@@ -56,12 +56,16 @@ html, body { width:100%; height:100%; overflow:hidden; background:#5aa8dc;
   padding:2px 12px; min-width:86px; }
 #windArrow { font-size:20px; line-height:1; color:#0b62a8; transition:transform .3s; }
 #windVal { font-size:12px; font-weight:900; color:#333; }
-#turnTimer { font-size:14px; font-weight:900; color:#d8321e; }
+#turnTimer { font-size:19px; font-weight:900; color:#d8321e; }
 
 /* ---------- 컨트롤 ---------- */
 #controls { position:absolute; left:0; right:0; bottom:0; z-index:20; display:flex; align-items:flex-end;
   justify-content:space-between; gap:8px; padding:10px;
-  padding-bottom:calc(10px + env(safe-area-inset-bottom)); pointer-events:none; }
+  padding-bottom:calc(10px + env(safe-area-inset-bottom)); pointer-events:none;
+  transition:opacity .35s; }
+#controls.ai-dim { opacity:0.35; }
+#controls.faded { opacity:0.08; }
+#controls.faded .ctl-group { pointer-events:none; }
 .ctl-group { display:flex; align-items:center; gap:8px; pointer-events:auto; }
 .move-group { flex-wrap:wrap; max-width:34vw; }
 .angle-group { flex-direction:column; gap:4px; }
@@ -94,3 +98,15 @@ html, body { width:100%; height:100%; overflow:hidden; background:#5aa8dc;
 
 #btnMute { position:absolute; top:calc(8px + env(safe-area-inset-top)); left:50%; transform:translateX(-50%) translateY(52px);
   z-index:21; background:rgba(255,255,255,.7); border:2px solid #4a86b0; border-radius:8px; font-size:14px; padding:2px 8px; cursor:pointer; }
+
+/* 가로 모드(낮은 화면): 조작부를 작고 낮게 */
+@media (max-height: 480px) {
+  .ctl-btn { width:44px; height:44px; font-size:18px; border-radius:11px; }
+  .ctl-btn.small { padding:5px 8px; font-size:11px; }
+  #btnFire { width:68px; height:68px; font-size:15px; }
+  #controls { padding:6px; gap:6px; }
+  .angle-group { flex-direction:row; }
+  #angleVal { min-width:44px; text-align:center; }
+  .hp-panel { width:min(150px,26vw); }
+  .move-group .mini-gauge { width:92px; }
+}

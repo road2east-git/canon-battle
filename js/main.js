@@ -268,7 +268,7 @@ const Game = {
   newMatch(){
     this.terrain = new Terrain();
     this.projectiles=[]; this.fx=new FX();
-    this.aiShots = 0;
+    this.aiShots = 0; this.turnCount = 0;
     const x1 = rand(140, 320), x2 = rand(WORLD_W-320, WORLD_W-140);
     const t1 = new Tank(this.selP1, 0, x1, 'P1 · '+TANK_TYPES[this.selP1].name, false);
     const aiIdx = this.mode==='1p' ? Math.floor(Math.random()*TANK_TYPES.length) : this.selP2;
@@ -277,7 +277,7 @@ const Game = {
     t2.y = this.terrain.heightAt(t2.x)-6;
     this.tanks=[t1,t2];
     this.current = Math.floor(Math.random()*2);
-    this.wind = Math.round(rand(-25,25));
+    this.wind = Math.round(rand(-6,6));   // 첫 턴은 약한 바람으로 시작
     this.state='play';
     this.lastImpact=null;
     this.startTurn(true);
@@ -290,7 +290,13 @@ const Game = {
   startTurn(first){
     const t=this.cur();
     if(!t.alive){ this.endMatch(); return; }
-    if(!first) this.wind = Math.round(rand(-28,28));
+    if(!first){
+      // 바람은 턴이 지날수록 범위가 넓어지고, 이전 값에서 점진적으로 변한다
+      this.turnCount++;
+      const cap = Math.min(28, 5 + this.turnCount*2.5);
+      const delta = Math.min(12, 3 + this.turnCount*1.2);
+      this.wind = Math.round(clamp(this.wind + rand(-delta,delta), -cap, cap));
+    }
     // 턴 시작 시 자동으로 적 방향을 바라본다
     const foe = this.tanks[1-this.current];
     if(foe && foe.alive) t.facing = foe.x > t.x ? 1 : -1;
@@ -546,6 +552,28 @@ const Render = {
     this.effects();
     this.water();
     this.powerGauge();
+    ctx.restore();
+    this.countdown(vw,vh);
+  },
+
+  // 5초 이하 남으면 화면 상단 중앙에 큰 카운트다운
+  countdown(vw,vh){
+    if(Game.state!=='play') return;
+    if(Game.phase!=='aim' && Game.phase!=='charging') return;
+    if(Game.cur().isAI) return;
+    if(Game.turnTimer>5.99) return;
+    const n=Math.ceil(Game.turnTimer);
+    const frac=Game.turnTimer-Math.floor(Game.turnTimer);
+    const pulse=1+0.35*frac;
+    ctx.save();
+    ctx.translate(vw/2, vh*0.2);
+    ctx.scale(pulse,pulse);
+    ctx.font='bold 64px Trebuchet MS, sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.lineWidth=8; ctx.strokeStyle='rgba(255,255,255,0.9)';
+    ctx.strokeText(n,0,0);
+    ctx.fillStyle='#e02818';
+    ctx.fillText(n,0,0);
     ctx.restore();
   },
 
@@ -997,7 +1025,7 @@ const UI = {
     const wp=cur.weapon();
     this.els.btnWeapon.textContent = cur.useSpecial&&cur.specialAmmo>0 ? `★${wp.label}(${cur.specialAmmo})` : wp.label;
     // 컨트롤 표시/숨김 (AI 턴엔 비활성 느낌)
-    this.els.controls.style.opacity = cur.isAI?0.35:1;
+    this.els.controls.classList.toggle('ai-dim', cur.isAI);
     this.els.controls.style.pointerEvents = cur.isAI?'none':'auto';
   },
 
@@ -1012,7 +1040,10 @@ const UI = {
     this.els.angleVal.textContent=Math.round(t.angle)+'°';
     this.els.fuelFill.style.width=(t.fuel/t.type.fuel*100)+'%';
     this.els.powerFill.style.width=Game.power+'%';
-    this.els.turnTimer.textContent = (Game.phase==='aim'||Game.phase==='charging') ? Math.ceil(Game.turnTimer) : '—';
+    this.els.turnTimer.textContent = (Game.phase==='aim'||Game.phase==='charging') ? '⏱'+Math.ceil(Game.turnTimer) : '—';
+    // 탄 비행/정산 중에는 조작부를 내려 착탄 지점이 보이게
+    const hide = Game.phase==='flying' || Game.phase==='resolve';
+    this.els.controls.classList.toggle('faded', hide);
     // 배너
     if(Game.banner.t<1.6){
       this.els.banner.textContent=Game.banner.text;

@@ -124,15 +124,18 @@ class Tank {
   }
   get color(){ return this.type.bodyColor[this.team]; }
   weapon(){ return this.useSpecial && this.specialAmmo>0 ? this.type.special : this.type.normal; }
-  muzzle(){
-    const a = this.barrelWorldAngle();
-    const bx = this.x + Math.cos(a)*30;
-    const by = this.y - 10 + Math.sin(a)*30;
-    return {x:bx, y:by};
+  muzzle(angDeg){
+    const a = this.barrelWorldAngle(angDeg);
+    // 포신 피벗(차체 위 0,-10)을 차체 기울기만큼 회전시킨 실제 위치
+    const px = this.x + 10*Math.sin(this.tilt);
+    const py = this.y - 10*Math.cos(this.tilt);
+    return {x:px + Math.cos(a)*30, y:py + Math.sin(a)*30};
   }
-  barrelWorldAngle(){
-    // 화면 y는 아래가 +. 위로 쏘려면 음의 각
-    return this.facing===1 ? -this.angle*D2R : Math.PI + this.angle*D2R;
+  barrelWorldAngle(angDeg){
+    // 화면 y는 아래가 +. 위로 쏘려면 음의 각. 차체 기울기 포함(보이는 대로 나감)
+    const ang = (angDeg===undefined ? this.angle : angDeg)*D2R;
+    const base = this.facing===1 ? -ang : Math.PI + ang;
+    return base + this.tilt;
   }
   settle(terrain, dt, game){
     const gy = terrain.heightAt(this.x) - 6;
@@ -287,6 +290,9 @@ const Game = {
     const t=this.cur();
     if(!t.alive){ this.endMatch(); return; }
     if(!first) this.wind = Math.round(rand(-28,28));
+    // 턴 시작 시 자동으로 적 방향을 바라본다
+    const foe = this.tanks[1-this.current];
+    if(foe && foe.alive) t.facing = foe.x > t.x ? 1 : -1;
     t.fuel = t.type.fuel;
     this.turnTimer = TURN_TIME;
     this.power = 0;
@@ -380,9 +386,10 @@ const Game = {
 
   // ---------- AI ----------
   simulateShot(from, angleDeg, power, w){
-    const a = from.facing===1 ? -angleDeg*D2R : Math.PI+angleDeg*D2R;
+    const a = from.barrelWorldAngle(angleDeg);
     const speed=power*POWER_TO_SPEED*w.speedMul;
-    let x=from.x+Math.cos(a)*30, y=from.y-10+Math.sin(a)*30;
+    const m = from.muzzle(angleDeg);
+    let x=m.x, y=m.y;
     let vx=Math.cos(a)*speed, vy=Math.sin(a)*speed;
     const h=1/60;
     for(let i=0;i<60*8;i++){
@@ -411,8 +418,8 @@ const Game = {
     }
     if(!best) best={ang:55, pow:70, d:999};
     // 실수 확률(난이도): 파워/각도에 약간의 오차 부여
-    best.pow = clamp(best.pow + rand(-2.2,2.2), 12, 100);
-    best.ang = clamp(best.ang + rand(-1.2,1.2), 5, 85);
+    best.pow = clamp(best.pow + rand(-1.2,1.2), 12, 100);
+    best.ang = clamp(best.ang + rand(-0.6,0.6), 5, 85);
     return best;
   },
 
@@ -459,7 +466,7 @@ const Game = {
         if(this.aiPlan){
           // 각도를 목표로 서서히 이동
           const diff=this.aiPlan.ang-t.angle;
-          if(Math.abs(diff)>0.8) t.angle+=Math.sign(diff)*Math.min(Math.abs(diff), 40*dt);
+          if(Math.abs(diff)>0.25) t.angle+=Math.sign(diff)*Math.min(Math.abs(diff), 40*dt);
           else if(this.aiTimer>1.6){
             this.power=clamp(this.power+70*dt, 0, this.aiPlan.pow);
             if(this.power>=this.aiPlan.pow-0.5) this.fire();
@@ -533,6 +540,7 @@ const Render = {
     this.projectiles();
     this.effects();
     this.water();
+    this.powerGauge();
     ctx.restore();
   },
 
@@ -764,6 +772,31 @@ const Render = {
     ctx.restore();
   },
 
+  // 차지 중 탱크 머리 위 대형 파워 게이지 (손가락에 가리지 않게)
+  powerGauge(){
+    if(Game.state!=='play') return;
+    const charging = Game.phase==='charging' || (Game.phase==='aiThink' && Game.power>0);
+    if(!charging) return;
+    const t=Game.cur();
+    const w=96, h=14, x=t.x-w/2, y=t.y-86;
+    ctx.save();
+    ctx.fillStyle='rgba(0,0,0,0.45)';
+    this.rr(x-3,y-3,w+6,h+6,7); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.25)';
+    this.rr(x,y,w,h,5); ctx.fill();
+    const g=ctx.createLinearGradient(x,0,x+w,0);
+    g.addColorStop(0,'#ffe63e'); g.addColorStop(0.6,'#ff8c1a'); g.addColorStop(1,'#ff2d1a');
+    ctx.fillStyle=g;
+    const fw=w*Game.power/100;
+    if(fw>1){ this.rr(x,y,fw,h,5); ctx.fill(); }
+    ctx.strokeStyle='#fff'; ctx.lineWidth=2;
+    this.rr(x,y,w,h,5); ctx.stroke();
+    ctx.fillStyle='#fff'; ctx.font='bold 13px Trebuchet MS, sans-serif';
+    ctx.textAlign='center';
+    ctx.fillText(Math.round(Game.power), x+w/2, y-6);
+    ctx.restore();
+  },
+
   rr(x,y,w,h,r){
     ctx.beginPath();
     ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
@@ -787,7 +820,7 @@ const UI = {
   init(){
     const ids=['titleScreen','selectScreen','hud','controls','overScreen','banner','btnMute',
       'btn1p','btn2p','tankCards','btnStart','selectTitle','btnLeft','btnRight','btnAngUp','btnAngDown',
-      'angleVal','btnWeapon','btnFire','powerFill','fuelFill','windArrow','windVal','turnTimer',
+      'angleVal','btnWeapon','btnFlip','btnFire','powerFill','fuelFill','windArrow','windVal','turnTimer',
       'hpP1','hpP2','btnAgain','btnMenu'];
     for(const id of ids) this.els[id]=document.getElementById(id);
 
@@ -813,6 +846,13 @@ const UI = {
     this.hold(this.els.btnRight, v=>Input.right=v);
     this.hold(this.els.btnAngUp,   v=>Input.angUp=v);
     this.hold(this.els.btnAngDown, v=>Input.angDown=v);
+
+    // 방향 전환
+    this.els.btnFlip.addEventListener('click', ()=>{
+      const t=Game.cur();
+      if(Game.state!=='play' || t.isAI || Game.phase!=='aim') return;
+      t.facing*=-1; Sound.click();
+    });
 
     // 무기 전환
     this.els.btnWeapon.addEventListener('click', ()=>{
@@ -846,6 +886,7 @@ const UI = {
       if(e.code==='ArrowDown') Input.angDown=true;
       if(e.code==='Space' && Game.phase==='aim' && !e.repeat){ Sound.init(); Game.phase='charging'; Game.power=0; }
       if(e.code==='KeyX' && Game.phase==='aim') this.els.btnWeapon.click();
+      if(e.code==='KeyF' && Game.phase==='aim') this.els.btnFlip.click();
     });
     window.addEventListener('keyup', e=>{
       if(e.code==='ArrowLeft') Input.left=false;

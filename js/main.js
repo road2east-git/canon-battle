@@ -121,6 +121,7 @@ class Tank {
     this.alive = true;
     this.tilt = 0;
     this.hitFlash = 0;
+    this.recoil = 0;
   }
   get color(){ return this.type.bodyColor[this.team]; }
   weapon(){ return this.useSpecial && this.specialAmmo>0 ? this.type.special : this.type.normal; }
@@ -163,6 +164,7 @@ class Tank {
     const target = this.airborne?0:terrain.slopeAt(this.x);
     this.tilt = lerp(this.tilt, target, Math.min(1,dt*10));
     if(this.hitFlash>0) this.hitFlash-=dt;
+    if(this.recoil>0) this.recoil=Math.max(0, this.recoil-dt*4.5);
   }
   move(dir, dt, terrain){
     if(this.fuel<=0 || this.airborne) return;
@@ -214,7 +216,8 @@ class Projectile {
 
 // ---------------- 파티클/이펙트 ----------------
 class FX {
-  constructor(){ this.parts=[]; this.pops=[]; this.rings=[]; this.smokes=[]; }
+  constructor(){ this.parts=[]; this.pops=[]; this.rings=[]; this.smokes=[]; this.flashes=[]; }
+  flash(x,y,a){ this.flashes.push({x,y,a,t:0}); }
   burst(x,y,r,colors){
     for(let i=0;i<Math.min(46, r*0.9);i++){
       const a=rand(0,6.283), sp=rand(40, r*7);
@@ -240,6 +243,8 @@ class FX {
     this.rings=this.rings.filter(r=>r.t<0.45);
     for(const s of this.smokes){ s.t+=dt; s.y-=26*dt; s.r+=10*dt; }
     this.smokes=this.smokes.filter(s=>s.t<s.life);
+    for(const f of this.flashes) f.t+=dt;
+    this.flashes=this.flashes.filter(f=>f.t<0.13);
   }
 }
 
@@ -340,6 +345,8 @@ const Game = {
       const vx=Math.cos(a+off)*speed, vy=Math.sin(a+off)*speed;
       this.projectiles.push(new Projectile(m.x,m.y,vx,vy,w,t));
     }
+    this.fx.flash(m.x, m.y, a);
+    t.recoil = 1;
     Sound.fire();
     this.cam.shake=Math.max(this.cam.shake, 4);
     this.phase='flying';
@@ -666,40 +673,15 @@ const Render = {
     ctx.save();
     ctx.translate(t.x, t.y);
     ctx.rotate(t.tilt);
-    const c=t.color;
-    const dark=this.shade(c,-38), light=this.shade(c,40);
-    // 포신
+    // 접지 그림자
     ctx.save();
-    ctx.translate(0,-10);
-    ctx.rotate(t.facing===1 ? -t.angle*D2R : Math.PI+t.angle*D2R);
-    ctx.fillStyle=dark;
-    this.rr(2,-4.5,30,9,4); ctx.fill();
-    ctx.fillStyle=this.shade(c,-15);
-    this.rr(2,-4.5,30,4,2); ctx.fill();
+    ctx.globalAlpha=0.28; ctx.fillStyle='#1a2a10';
+    ctx.beginPath(); ctx.ellipse(0,2.5,23,4,0,0,6.283); ctx.fill();
     ctx.restore();
-    // 무한궤도
-    ctx.fillStyle='#3b3b46';
-    this.rr(-20,-8,40,12,6); ctx.fill();
-    ctx.fillStyle='#23232b';
-    for(let i=-14;i<=14;i+=7){ ctx.beginPath(); ctx.arc(i,-2,3.4,0,6.283); ctx.fill(); }
-    // 차체
-    const bodyGrd=ctx.createLinearGradient(0,-24,0,-6);
-    bodyGrd.addColorStop(0,light); bodyGrd.addColorStop(1,c);
-    ctx.fillStyle=bodyGrd;
-    this.rr(-17,-20,34,13,6); ctx.fill();
-    ctx.strokeStyle=dark; ctx.lineWidth=2;
-    this.rr(-17,-20,34,13,6); ctx.stroke();
-    // 포탑 돔
-    ctx.fillStyle=bodyGrd;
-    ctx.beginPath(); ctx.arc(0,-19,9.5,Math.PI,0); ctx.closePath(); ctx.fill();
-    ctx.strokeStyle=dark; ctx.beginPath(); ctx.arc(0,-19,9.5,Math.PI,0); ctx.stroke();
-    // 해치 + 안테나
-    ctx.fillStyle=light; ctx.beginPath(); ctx.arc(0,-22,3.4,0,6.283); ctx.fill();
-    ctx.strokeStyle=dark; ctx.lineWidth=1.5;
-    ctx.beginPath(); ctx.moveTo(-10*t.facing,-24); ctx.lineTo(-13*t.facing,-34); ctx.stroke();
-    ctx.fillStyle='#ffd23e'; ctx.beginPath(); ctx.arc(-13*t.facing,-35,2,0,6.283); ctx.fill();
+    const aLocal = t.facing===1 ? -t.angle*D2R : Math.PI + t.angle*D2R;
+    this.tankBody(ctx, t.type.id, t.color, t.facing, aLocal, t.recoil);
     // 피격 플래시
-    if(t.hitFlash>0){ ctx.globalAlpha=Math.min(0.7,t.hitFlash*2); ctx.fillStyle='#fff'; this.rr(-20,-28,40,24,8); ctx.fill(); ctx.globalAlpha=1; }
+    if(t.hitFlash>0){ ctx.globalAlpha=Math.min(0.7,t.hitFlash*2); ctx.fillStyle='#fff'; this.rr(-20,-28,40,26,8); ctx.fill(); ctx.globalAlpha=1; }
     ctx.restore();
 
     // 이름 + HP바 (기울기 미적용)
@@ -792,6 +774,21 @@ const Render = {
       ctx.beginPath(); ctx.arc(r.x,r.y,r.r+(r.max-r.r)*k,0,6.283); ctx.stroke();
       ctx.restore();
     }
+    // 총구 화염
+    for(const f of fx.flashes){
+      const k=f.t/0.13, s=1-k;
+      ctx.save();
+      ctx.translate(f.x,f.y); ctx.rotate(f.a);
+      ctx.globalCompositeOperation='lighter';
+      ctx.globalAlpha=s;
+      ctx.fillStyle='#ffca55';
+      ctx.beginPath();
+      ctx.moveTo(0,-4*s); ctx.lineTo(16*s,-1.5*s); ctx.lineTo(24*s,0);
+      ctx.lineTo(16*s,1.5*s); ctx.lineTo(0,4*s); ctx.closePath(); ctx.fill();
+      ctx.fillStyle='#fff3c0';
+      ctx.beginPath(); ctx.arc(3,0,4.5*s,0,6.283); ctx.fill();
+      ctx.restore();
+    }
     ctx.save();
     ctx.textAlign='center'; ctx.font='bold 20px Trebuchet MS, sans-serif';
     for(const p of fx.pops){
@@ -830,10 +827,155 @@ const Render = {
     ctx.restore();
   },
 
-  rr(x,y,w,h,r){
-    ctx.beginPath();
-    ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
-    ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+  rr(x,y,w,h,r){ this.rrOn(ctx,x,y,w,h,r); },
+  rrOn(c,x,y,w,h,r){
+    c.beginPath();
+    c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r);
+    c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath();
+  },
+
+  // ---------- 프리미엄 탱크 스프라이트 (타입별 실루엣) ----------
+  // 원점 = 접지 중심. 포신 피벗은 물리와 동일하게 (0,-10), 길이 30 유지.
+  tankBody(c, typeId, color, facing, aLocal, recoil){
+    const dark=this.shade(color,-52), mid=this.shade(color,-18),
+          light=this.shade(color,44), glint=this.shade(color,85);
+    const M1='#23232c', M2='#3c3c48', M3='#5b5b6c', M4='#8b8b9e'; // 금속 팔레트
+
+    // ── 포신 (차체 뒤에 그림) ──
+    c.save();
+    c.translate(0,-10);
+    c.rotate(aLocal);
+    c.translate(-recoil*5, 0);           // 발사 반동
+    const bg=c.createLinearGradient(0,-5,0,5);
+    bg.addColorStop(0,M4); bg.addColorStop(0.45,M3); bg.addColorStop(1,M1);
+    c.fillStyle=bg;
+    if(typeId==='missos'){                // 얇고 긴 로켓 런처
+      this.rrOn(c,2,-3.2,29,6.4,3); c.fill();
+      c.fillStyle=M1; this.rrOn(c,24,-4.2,7,8.4,2.5); c.fill();  // 발사구 확장부
+      c.fillStyle='#151519'; c.beginPath(); c.ellipse(30.5,0,1.6,3,0,0,6.283); c.fill();
+    } else if(typeId==='boomba'){         // 두꺼운 중포신 + 머즐브레이크
+      this.rrOn(c,2,-4.6,28,9.2,4); c.fill();
+      c.fillStyle=M2; this.rrOn(c,22,-5.6,4,11.2,2); c.fill();
+      this.rrOn(c,27.5,-5.6,4,11.2,2); c.fill();
+      c.fillStyle='#151519'; c.beginPath(); c.ellipse(31.5,0,1.6,3.6,0,0,6.283); c.fill();
+    } else {                              // 캐니: 표준 포신 + 슬리브
+      this.rrOn(c,2,-4,29,8,3.5); c.fill();
+      c.fillStyle=mid; this.rrOn(c,6,-4.8,7,9.6,3); c.fill();    // 컬러 슬리브
+      c.fillStyle='#151519'; c.beginPath(); c.ellipse(30.5,0,1.5,3.2,0,0,6.283); c.fill();
+    }
+    // 포신 상단 하이라이트
+    c.fillStyle='rgba(255,255,255,0.35)';
+    this.rrOn(c,4,-3.8,24,2,1.5); c.fill();
+    c.restore();
+
+    // ── 무한궤도 ──
+    const tg=c.createLinearGradient(0,-9,0,4);
+    tg.addColorStop(0,M2); tg.addColorStop(1,M1);
+    c.fillStyle=tg;
+    this.rrOn(c,-21,-9,42,13,6.5); c.fill();
+    c.strokeStyle='#111116'; c.lineWidth=1.4;
+    this.rrOn(c,-21,-9,42,13,6.5); c.stroke();
+    // 트랙 패턴
+    c.strokeStyle='rgba(0,0,0,0.5)'; c.lineWidth=1;
+    for(let i=-18;i<=18;i+=4){ c.beginPath(); c.moveTo(i,-8.5); c.lineTo(i-1.5,3.2); c.stroke(); }
+    // 로드휠
+    for(let i=-14;i<=14;i+=7){
+      const wg=c.createRadialGradient(i-1,-3.5,0.5,i,-2.5,3.6);
+      wg.addColorStop(0,M4); wg.addColorStop(0.7,M2); wg.addColorStop(1,'#111116');
+      c.fillStyle=wg;
+      c.beginPath(); c.arc(i,-2.5,3.6,0,6.283); c.fill();
+      c.fillStyle=M1; c.beginPath(); c.arc(i,-2.5,1.2,0,6.283); c.fill();
+    }
+
+    // ── 차체 (타입별 실루엣) ──
+    const hull=c.createLinearGradient(0,-26,0,-7);
+    hull.addColorStop(0,light); hull.addColorStop(0.55,color); hull.addColorStop(1,mid);
+    c.fillStyle=hull; c.strokeStyle=dark; c.lineWidth=1.8;
+
+    if(typeId==='missos'){
+      // 날렵한 쐐기형 차체
+      c.beginPath();
+      c.moveTo(-19*facing,-9); c.lineTo(-17*facing,-19); c.lineTo(-4*facing,-22);
+      c.lineTo(14*facing,-20); c.lineTo(20*facing,-13); c.lineTo(19*facing,-9);
+      c.closePath(); c.fill(); c.stroke();
+      // 미사일 포드 (후방 상단, 튜브 3개)
+      c.save(); c.translate(-9*facing,-24);
+      c.fillStyle=M2; this.rrOn(c,-6,-4,12,7,2.5); c.fill();
+      c.strokeStyle='#111116'; c.lineWidth=1; this.rrOn(c,-6,-4,12,7,2.5); c.stroke();
+      for(let i=-3.5;i<=3.5;i+=3.5){
+        c.fillStyle='#151519'; c.beginPath(); c.arc(i*facing,-0.5,1.5,0,6.283); c.fill();
+        c.fillStyle='#ff8c4a'; c.beginPath(); c.arc(i*facing,-0.5,0.7,0,6.283); c.fill();
+      }
+      c.restore();
+      // 콕핏 캐노피
+      const cg=c.createLinearGradient(0,-24,0,-18);
+      cg.addColorStop(0,'#e8fbff'); cg.addColorStop(1,'#5fb8e8');
+      c.fillStyle=cg;
+      c.beginPath(); c.ellipse(6*facing,-20.5,5.5,3.4,0,Math.PI,0); c.closePath(); c.fill();
+      c.strokeStyle=dark; c.lineWidth=1.2; c.beginPath(); c.ellipse(6*facing,-20.5,5.5,3.4,0,Math.PI,0); c.stroke();
+      // 스피드 스트라이프
+      c.fillStyle=glint; c.globalAlpha=0.8;
+      c.beginPath();
+      c.moveTo(-16*facing,-17); c.lineTo(16*facing,-15.5); c.lineTo(16*facing,-13.5); c.lineTo(-17*facing,-14.5);
+      c.closePath(); c.fill(); c.globalAlpha=1;
+    } else if(typeId==='boomba'){
+      // 육중한 장갑 차체
+      this.rrOn(c,-19,-24,38,17,4.5); c.fill(); c.stroke();
+      // 전면 경사 장갑판
+      c.fillStyle=mid;
+      c.beginPath();
+      c.moveTo(19*facing,-24); c.lineTo(23*facing,-15); c.lineTo(19*facing,-7);
+      c.closePath(); c.fill();
+      c.strokeStyle=dark; c.stroke();
+      // 장갑 리벳
+      c.fillStyle=dark;
+      for(const [rx,ry] of [[-15,-21],[-15,-10],[15,-21],[15,-10],[0,-21]]){
+        c.beginPath(); c.arc(rx,ry,1.1,0,6.283); c.fill();
+      }
+      // 포탑 (각진 큐폴라)
+      const tg2=c.createLinearGradient(0,-32,0,-22);
+      tg2.addColorStop(0,light); tg2.addColorStop(1,color);
+      c.fillStyle=tg2;
+      this.rrOn(c,-9,-31,18,8,3); c.fill();
+      c.strokeStyle=dark; c.lineWidth=1.5; this.rrOn(c,-9,-31,18,8,3); c.stroke();
+      c.fillStyle=glint; this.rrOn(c,-7,-30.2,14,2,1); c.fill();
+      // 배기관 2개
+      c.fillStyle=M2;
+      this.rrOn(c,-19.5*facing-(facing===1?0:3),-29,3,6,1.5); c.fill();
+      this.rrOn(c,-15.5*facing-(facing===1?0:3),-27,3,4,1.5); c.fill();
+    } else {
+      // 캐니: 클래식 라운드 차체
+      this.rrOn(c,-17,-21,34,14,6); c.fill(); c.stroke();
+      // 사이드 스커트 스트라이프
+      c.fillStyle=glint; c.globalAlpha=0.85;
+      this.rrOn(c,-15,-12,30,2.6,1.3); c.fill(); c.globalAlpha=1;
+      // 패널 라인
+      c.strokeStyle='rgba(0,0,0,0.25)'; c.lineWidth=1;
+      c.beginPath(); c.moveTo(-6,-21); c.lineTo(-6,-12); c.stroke();
+      c.beginPath(); c.moveTo(8,-21); c.lineTo(8,-12); c.stroke();
+      // 포탑 돔
+      const dg=c.createRadialGradient(-2,-24,1,0,-20,10);
+      dg.addColorStop(0,glint); dg.addColorStop(0.55,light); dg.addColorStop(1,color);
+      c.fillStyle=dg;
+      c.beginPath(); c.arc(0,-20,9.5,Math.PI,0); c.closePath(); c.fill();
+      c.strokeStyle=dark; c.lineWidth=1.6;
+      c.beginPath(); c.arc(0,-20,9.5,Math.PI,0); c.stroke();
+      // 해치
+      c.fillStyle=light; c.beginPath(); c.arc(0,-24,3,0,6.283); c.fill();
+      c.strokeStyle=dark; c.lineWidth=1; c.beginPath(); c.arc(0,-24,3,0,6.283); c.stroke();
+    }
+
+    // ── 공통: 스펙큘러 하이라이트 + 안테나 ──
+    c.save();
+    c.globalAlpha=0.22; c.fillStyle='#ffffff';
+    c.beginPath(); c.ellipse(-5*facing,-20,10,3.4,-0.25*facing,0,6.283); c.fill();
+    c.restore();
+    c.strokeStyle=M2; c.lineWidth=1.3;
+    c.beginPath(); c.moveTo(-12*facing,-24); c.lineTo(-16*facing,-36); c.stroke();
+    c.fillStyle='#ffd23e';
+    c.beginPath(); c.arc(-16*facing,-37,1.9,0,6.283); c.fill();
+    c.fillStyle='rgba(255,255,255,0.7)';
+    c.beginPath(); c.arc(-16.6*facing,-37.6,0.7,0,6.283); c.fill();
   },
   shade(hex, amt){
     const n=parseInt(hex.slice(1),16);
@@ -964,7 +1106,7 @@ const UI = {
       const d=document.createElement('div'); d.className='tdesc';
       d.textContent=`${tt.desc.replace('\n',' ')} (HP ${tt.hp} · 특수 ${tt.special.label}×${tt.special.ammo})`;
       card.appendChild(d);
-      this.drawCardTank(cv, tt.bodyColor[team]);
+      this.drawCardTank(cv, tt.bodyColor[team], tt.id);
       card.addEventListener('click', ()=>{
         Sound.init(); Sound.click();
         box.querySelectorAll('.tank-card').forEach(c=>c.classList.remove('sel'));
@@ -975,25 +1117,13 @@ const UI = {
     });
   },
 
-  drawCardTank(cv, color){
+  drawCardTank(cv, color, typeId){
     const c=cv.getContext('2d');
     c.clearRect(0,0,cv.width,cv.height);
     c.save();
-    c.translate(cv.width/2, cv.height-12);
-    c.scale(1.4,1.4);
-    const dark=Render.shade.call({},color,-38)||'#333';
-    // 간이 렌더 (Render.rr는 메인 ctx 전용이라 직접 그림)
-    c.save(); c.translate(0,-10); c.rotate(-40*D2R);
-    c.fillStyle=Render.shade(color,-38);
-    c.fillRect(2,-4,26,8);
-    c.restore();
-    c.fillStyle='#3b3b46';
-    c.beginPath(); c.roundRect(-18,-8,36,11,5); c.fill();
-    c.fillStyle=color;
-    c.beginPath(); c.roundRect(-15,-19,30,12,5); c.fill();
-    c.beginPath(); c.arc(0,-18,8,Math.PI,0); c.fill();
-    c.strokeStyle=Render.shade(color,-38); c.lineWidth=1.6;
-    c.beginPath(); c.roundRect(-15,-19,30,12,5); c.stroke();
+    c.translate(cv.width/2, cv.height-8);
+    c.scale(1.35,1.35);
+    Render.tankBody(c, typeId, color, 1, -35*D2R, 0);
     c.restore();
   },
 

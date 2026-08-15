@@ -260,7 +260,7 @@ const Game = {
   camTarget:null,
   clouds:[], time:0,
   selP1:0, selP2:0, selStep:0,
-  aiTimer:0, aiPlan:null,
+  aiTimer:0, aiPlan:null, aiShots:0,
   banner:{text:'', t:99},
   lastImpact:null,
   turnSwitchDelay:0,
@@ -268,6 +268,7 @@ const Game = {
   newMatch(){
     this.terrain = new Terrain();
     this.projectiles=[]; this.fx=new FX();
+    this.aiShots = 0;
     const x1 = rand(140, 320), x2 = rand(WORLD_W-320, WORLD_W-140);
     const t1 = new Tank(this.selP1, 0, x1, 'P1 · '+TANK_TYPES[this.selP1].name, false);
     const aiIdx = this.mode==='1p' ? Math.floor(Math.random()*TANK_TYPES.length) : this.selP2;
@@ -417,9 +418,13 @@ const Game = {
       }
     }
     if(!best) best={ang:55, pow:70, d:999};
-    // 실수 확률(난이도): 파워/각도에 약간의 오차 부여
-    best.pow = clamp(best.pow + rand(-1.2,1.2), 12, 100);
-    best.ang = clamp(best.ang + rand(-0.6,0.6), 5, 85);
+    // 성장형 난이도: 첫 발은 크게 빗나가고, 쏠수록 감을 잡아 오차가 줄어든다
+    const skill = Math.min(1, this.aiShots*0.18);          // 0 → 1 (약 6발째 최고조)
+    const powErr = lerp(5.5, 1.2, skill);
+    const angErr = lerp(2.6, 0.6, skill);
+    best.pow = clamp(best.pow + rand(-powErr,powErr), 12, 100);
+    best.ang = clamp(best.ang + rand(-angErr,angErr), 5, 85);
+    this.aiShots++;
     return best;
   },
 

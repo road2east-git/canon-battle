@@ -1,0 +1,1007 @@
+/* ================================================================
+   캐논 배틀 — 포트리스 스타일 턴제 포격 게임
+   자체 물리엔진(포물선 탄도 + 바람 + 지형 파괴 + 낙하/넉백)
+   모바일 터치 우선, 데스크톱 키보드 지원
+   ================================================================ */
+'use strict';
+
+// ---------------- 상수 ----------------
+const WORLD_W = 1700;          // 월드 폭 (px)
+const WORLD_H = 960;           // 월드 높이
+const WATER_Y = WORLD_H - 46;  // 수면 y
+const GRAVITY = 300;           // px/s^2
+const WIND_ACCEL = 2.4;        // 바람 1당 가속도
+const POWER_TO_SPEED = 7.6;    // 파워(0~100) → 초기 속도
+const TURN_TIME = 30;          // 턴 제한(초)
+const TANK_R = 16;             // 탱크 피격 반경
+
+// ---------------- 탱크 타입 ----------------
+const TANK_TYPES = [
+  {
+    id:'canny', name:'캐니', desc:'균형 잡힌 표준 캐논.\n일반탄이 든든하다.',
+    hp:100, fuel:110, bodyColor:['#4aa3e8','#e85b4a'],
+    normal:{ label:'캐논탄', dmg:26, radius:42, speedMul:1.0, gravMul:1.0, count:1, spread:0 },
+    special:{ label:'더블샷', dmg:17, radius:30, speedMul:1.0, gravMul:1.0, count:2, spread:4, ammo:2 },
+  },
+  {
+    id:'missos', name:'미소스', desc:'빠르고 곧게 나는 로켓.\n특수탄은 3연발!',
+    hp:90, fuel:130, bodyColor:['#39b8a0','#e88f3a'],
+    normal:{ label:'로켓탄', dmg:29, radius:32, speedMul:1.22, gravMul:0.88, count:1, spread:0 },
+    special:{ label:'트리플', dmg:12, radius:24, speedMul:1.22, gravMul:0.88, count:3, spread:5, ammo:2 },
+  },
+  {
+    id:'boomba', name:'붐바', desc:'느리지만 강력한 중전차.\n메가봄은 지형을 크게 판다.',
+    hp:115, fuel:85, bodyColor:['#7d6ae0','#d64a7d'],
+    normal:{ label:'헤비탄', dmg:31, radius:50, speedMul:0.9, gravMul:1.05, count:1, spread:0 },
+    special:{ label:'메가봄', dmg:44, radius:66, speedMul:0.82, gravMul:1.1, count:1, spread:0, ammo:2 },
+  },
+];
+
+// ---------------- 유틸 ----------------
+const clamp = (v,a,b)=> v<a?a : v>b?b : v;
+const lerp = (a,b,t)=> a+(b-a)*t;
+const rand = (a,b)=> a + Math.random()*(b-a);
+const D2R = Math.PI/180;
+// 시드 기반 의사난수(지형 텍스처 점 고정용)
+function hash(n){ const s = Math.sin(n*127.1)*43758.5453; return s - Math.floor(s); }
+
+// ---------------- 사운드 (WebAudio 합성) ----------------
+const Sound = {
+  ctx:null, muted:false,
+  init(){ if(!this.ctx){ try{ this.ctx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } if(this.ctx && this.ctx.state==='suspended') this.ctx.resume(); },
+  play(fn){ if(this.muted||!this.ctx) return; try{ fn(this.ctx); }catch(e){} },
+  fire(){ this.play(c=>{ const o=c.createOscillator(), g=c.createGain();
+    o.type='square'; o.frequency.setValueAtTime(340,c.currentTime);
+    o.frequency.exponentialRampToValueAtTime(60,c.currentTime+0.28);
+    g.gain.setValueAtTime(0.22,c.currentTime); g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+0.3);
+    o.connect(g).connect(c.destination); o.start(); o.stop(c.currentTime+0.32); }); },
+  boom(big){ this.play(c=>{ const len=big?0.7:0.45, buf=c.createBuffer(1,c.sampleRate*len,c.sampleRate), d=buf.getChannelData(0);
+    for(let i=0;i<d.length;i++){ d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,2); }
+    const s=c.createBufferSource(), g=c.createGain(), f=c.createBiquadFilter();
+    f.type='lowpass'; f.frequency.value=big?900:1400;
+    g.gain.value=big?0.55:0.4; s.buffer=buf; s.connect(f).connect(g).connect(c.destination); s.start(); }); },
+  splash(){ this.play(c=>{ const buf=c.createBuffer(1,c.sampleRate*0.4,c.sampleRate), d=buf.getChannelData(0);
+    for(let i=0;i<d.length;i++){ d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,1.2)*0.5; }
+    const s=c.createBufferSource(), f=c.createBiquadFilter(), g=c.createGain();
+    f.type='highpass'; f.frequency.value=1200; g.gain.value=0.3;
+    s.buffer=buf; s.connect(f).connect(g).connect(c.destination); s.start(); }); },
+  click(){ this.play(c=>{ const o=c.createOscillator(), g=c.createGain();
+    o.type='sine'; o.frequency.value=660; g.gain.setValueAtTime(0.12,c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+0.08);
+    o.connect(g).connect(c.destination); o.start(); o.stop(c.currentTime+0.09); }); },
+};
+
+// ---------------- 지형 ----------------
+class Terrain {
+  constructor(){ this.ground = new Float32Array(WORLD_W); this.generate(); }
+  generate(){
+    const base = rand(WORLD_H*0.52, WORLD_H*0.62);
+    const a1=rand(40,90), a2=rand(25,60), a3=rand(10,25);
+    const f1=rand(1.1,1.9), f2=rand(2.5,4.2), f3=rand(6,9);
+    const p1=rand(0,6.28), p2=rand(0,6.28), p3=rand(0,6.28);
+    for(let x=0;x<WORLD_W;x++){
+      const t = x/WORLD_W*Math.PI*2;
+      let y = base + Math.sin(t*f1+p1)*a1 + Math.sin(t*f2+p2)*a2 + Math.sin(t*f3+p3)*a3;
+      this.ground[x] = clamp(y, WORLD_H*0.28, WATER_Y-30);
+    }
+  }
+  heightAt(x){ return this.ground[clamp(Math.round(x),0,WORLD_W-1)]; }
+  slopeAt(x){
+    const l=this.heightAt(x-8), r=this.heightAt(x+8);
+    return Math.atan2(r-l, 16);
+  }
+  // 원형 크레이터: 폭발 원의 아래쪽 경계까지 지표를 깎는다
+  crater(cx, cy, r){
+    const x0=clamp(Math.floor(cx-r),0,WORLD_W-1), x1=clamp(Math.ceil(cx+r),0,WORLD_W-1);
+    for(let x=x0;x<=x1;x++){
+      const dx=x-cx, dy2=r*r-dx*dx;
+      if(dy2<=0) continue;
+      const dy=Math.sqrt(dy2), top=cy-dy, bot=cy+dy;
+      const g=this.ground[x];
+      if(top<=g && bot>g) this.ground[x]=Math.min(bot, WORLD_H-6);
+    }
+  }
+}
+
+// ---------------- 탱크 ----------------
+class Tank {
+  constructor(typeIdx, teamIdx, x, name, isAI){
+    this.type = TANK_TYPES[typeIdx];
+    this.team = teamIdx;             // 0 = P1(파랑계열), 1 = P2(빨강계열)
+    this.name = name;
+    this.isAI = isAI;
+    this.x = x; this.y = 0;
+    this.vx = 0; this.vy = 0; this.airborne = false;
+    this.hp = this.type.hp; this.maxHp = this.type.hp;
+    this.facing = teamIdx===0 ? 1 : -1;
+    this.angle = 45;                 // 포신 각도(지면 기준 0~85)
+    this.fuel = this.type.fuel;
+    this.specialAmmo = this.type.special.ammo;
+    this.useSpecial = false;
+    this.alive = true;
+    this.tilt = 0;
+    this.hitFlash = 0;
+  }
+  get color(){ return this.type.bodyColor[this.team]; }
+  weapon(){ return this.useSpecial && this.specialAmmo>0 ? this.type.special : this.type.normal; }
+  muzzle(){
+    const a = this.barrelWorldAngle();
+    const bx = this.x + Math.cos(a)*30;
+    const by = this.y - 10 + Math.sin(a)*30;
+    return {x:bx, y:by};
+  }
+  barrelWorldAngle(){
+    // 화면 y는 아래가 +. 위로 쏘려면 음의 각
+    return this.facing===1 ? -this.angle*D2R : Math.PI + this.angle*D2R;
+  }
+  settle(terrain, dt, game){
+    const gy = terrain.heightAt(this.x) - 6;
+    if(this.airborne){
+      this.vy += GRAVITY*1.2*dt;
+      this.x = clamp(this.x + this.vx*dt, 8, WORLD_W-8);
+      this.y += this.vy*dt;
+      if(this.y >= terrain.heightAt(this.x)-6){
+        // 착지
+        const impact = this.vy;
+        this.y = terrain.heightAt(this.x)-6;
+        this.airborne=false; this.vx=0; this.vy=0;
+        if(impact>430 && this.alive){
+          const dmg = Math.round((impact-430)*0.06);
+          if(dmg>0) game.applyDamage(this, dmg, true);
+        }
+      }
+      if(this.y > WATER_Y-4 && this.alive){ game.drown(this); }
+    } else {
+      // 지형이 깎이면 낙하 시작
+      if(this.y < gy-2){ this.airborne=true; this.vy=0; }
+      else this.y = gy;
+      if(this.y > WATER_Y-4 && this.alive){ game.drown(this); }
+    }
+    const target = this.airborne?0:terrain.slopeAt(this.x);
+    this.tilt = lerp(this.tilt, target, Math.min(1,dt*10));
+    if(this.hitFlash>0) this.hitFlash-=dt;
+  }
+  move(dir, dt, terrain){
+    if(this.fuel<=0 || this.airborne) return;
+    const step = dir*46*dt;
+    const nx = clamp(this.x+step, 12, WORLD_W-12);
+    const dh = terrain.heightAt(nx) - terrain.heightAt(this.x);
+    if(dh < -Math.abs(step)*1.9) return;   // 너무 가파른 오르막(위쪽=작은 y) 금지
+    this.x = nx;
+    this.facing = dir>0?1:-1;
+    this.fuel = Math.max(0, this.fuel - 32*dt);
+  }
+}
+
+// ---------------- 발사체 ----------------
+class Projectile {
+  constructor(x,y,vx,vy,weapon,owner){
+    this.x=x; this.y=y; this.vx=vx; this.vy=vy;
+    this.weapon=weapon; this.owner=owner;
+    this.dead=false; this.trail=[]; this.age=0;
+  }
+  step(dt, game){
+    this.age+=dt;
+    const sub=4, h=dt/sub;
+    for(let i=0;i<sub && !this.dead;i++){
+      this.vx += game.wind*WIND_ACCEL*h;
+      this.vy += GRAVITY*this.weapon.gravMul*h;
+      this.x += this.vx*h; this.y += this.vy*h;
+      // 월드 밖
+      if(this.x<-250 || this.x>WORLD_W+250 || this.y>WORLD_H+60){ this.dead=true; return; }
+      // 물
+      if(this.y>WATER_Y+4){ this.dead=true; game.splashAt(this.x); return; }
+      // 탱크 직격
+      for(const t of game.tanks){
+        if(!t.alive) continue;
+        if(this.age<0.08 && t===this.owner) continue;   // 발사 직후 자기 몸 무시
+        const dx=this.x-t.x, dy=this.y-(t.y-8);
+        if(dx*dx+dy*dy < TANK_R*TANK_R){ this.explode(game); return; }
+      }
+      // 지형
+      if(this.x>=0 && this.x<WORLD_W && this.y >= game.terrain.heightAt(this.x)){
+        this.explode(game); return;
+      }
+    }
+    this.trail.push({x:this.x, y:this.y, t:0.5});
+    if(this.trail.length>26) this.trail.shift();
+  }
+  explode(game){ this.dead=true; game.explosionAt(this.x, this.y, this.weapon, this.owner); }
+}
+
+// ---------------- 파티클/이펙트 ----------------
+class FX {
+  constructor(){ this.parts=[]; this.pops=[]; this.rings=[]; this.smokes=[]; }
+  burst(x,y,r,colors){
+    for(let i=0;i<Math.min(46, r*0.9);i++){
+      const a=rand(0,6.283), sp=rand(40, r*7);
+      this.parts.push({x,y,vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-rand(30,120),
+        life:rand(0.4,0.9), t:0, size:rand(2,5), c:colors[i%colors.length]});
+    }
+    this.rings.push({x,y,r:4,max:r*1.4,t:0});
+  }
+  splash(x){
+    for(let i=0;i<24;i++){
+      this.parts.push({x:x+rand(-6,6), y:WATER_Y, vx:rand(-60,60), vy:rand(-260,-90),
+        life:rand(0.4,0.8), t:0, size:rand(2,4), c:'#bfe7ff'});
+    }
+  }
+  pop(x,y,text,color){ this.pops.push({x,y,text,color,t:0}); }
+  smoke(x,y){ this.smokes.push({x,y,r:rand(3,6),t:0,life:rand(0.5,0.9)}); }
+  update(dt){
+    for(const p of this.parts){ p.t+=dt; p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=520*dt; }
+    this.parts=this.parts.filter(p=>p.t<p.life);
+    for(const p of this.pops) p.t+=dt;
+    this.pops=this.pops.filter(p=>p.t<1.2);
+    for(const r of this.rings) r.t+=dt;
+    this.rings=this.rings.filter(r=>r.t<0.45);
+    for(const s of this.smokes){ s.t+=dt; s.y-=26*dt; s.r+=10*dt; }
+    this.smokes=this.smokes.filter(s=>s.t<s.life);
+  }
+}
+
+// ================================================================
+//                          게임 본체
+// ================================================================
+const canvas=document.getElementById('game');
+const ctx=canvas.getContext('2d');
+
+const Game = {
+  state:'title',            // title | select | play | over
+  mode:'1p',
+  terrain:null, tanks:[], projectiles:[], fx:new FX(),
+  current:0, wind:0, turnTimer:TURN_TIME,
+  phase:'aim',              // aim | charging | flying | resolve | aiThink
+  power:0, chargeDir:1,
+  cam:{x:WORLD_W/2, y:WORLD_H/2, zoom:1, shake:0},
+  camTarget:null,
+  clouds:[], time:0,
+  selP1:0, selP2:0, selStep:0,
+  aiTimer:0, aiPlan:null,
+  banner:{text:'', t:99},
+  lastImpact:null,
+  turnSwitchDelay:0,
+
+  newMatch(){
+    this.terrain = new Terrain();
+    this.projectiles=[]; this.fx=new FX();
+    const x1 = rand(140, 320), x2 = rand(WORLD_W-320, WORLD_W-140);
+    const t1 = new Tank(this.selP1, 0, x1, 'P1 · '+TANK_TYPES[this.selP1].name, false);
+    const aiIdx = this.mode==='1p' ? Math.floor(Math.random()*TANK_TYPES.length) : this.selP2;
+    const t2 = new Tank(aiIdx, 1, x2, (this.mode==='1p'?'AI · ':'P2 · ')+TANK_TYPES[aiIdx].name, this.mode==='1p');
+    t1.y = this.terrain.heightAt(t1.x)-6;
+    t2.y = this.terrain.heightAt(t2.x)-6;
+    this.tanks=[t1,t2];
+    this.current = Math.floor(Math.random()*2);
+    this.wind = Math.round(rand(-25,25));
+    this.state='play';
+    this.lastImpact=null;
+    this.startTurn(true);
+    UI.enterPlay();
+  },
+
+  cur(){ return this.tanks[this.current]; },
+  foe(){ return this.tanks[1-this.current]; },
+
+  startTurn(first){
+    const t=this.cur();
+    if(!t.alive){ this.endMatch(); return; }
+    if(!first) this.wind = Math.round(rand(-28,28));
+    t.fuel = t.type.fuel;
+    this.turnTimer = TURN_TIME;
+    this.power = 0;
+    this.phase = t.isAI ? 'aiThink' : 'aim';
+    this.aiTimer = 0; this.aiPlan=null;
+    this.camTarget = t;
+    this.showBanner(t.name + ' 차례!');
+    UI.refresh();
+  },
+
+  nextTurn(){
+    const alive=this.tanks.filter(t=>t.alive);
+    if(alive.length<=1){ this.endMatch(); return; }
+    this.current = 1-this.current;
+    this.startTurn(false);
+  },
+
+  endMatch(){
+    const alive=this.tanks.filter(t=>t.alive);
+    this.state='over';
+    const title = alive.length===1 ? alive[0].name+' 승리! 🏆' : '무승부!';
+    document.getElementById('overTitle').textContent=title;
+    UI.show('overScreen');
+    UI.hidePlayUI();
+  },
+
+  showBanner(text){ this.banner={text,t:0}; },
+
+  fire(){
+    const t=this.cur(), w=t.weapon();
+    if(t.useSpecial && t.specialAmmo>0) t.specialAmmo--;
+    if(t.specialAmmo<=0) t.useSpecial=false;
+    const speed = Math.max(12, this.power)*POWER_TO_SPEED*w.speedMul;
+    const a = t.barrelWorldAngle();
+    const m = t.muzzle();
+    for(let i=0;i<w.count;i++){
+      const off = (i-(w.count-1)/2)*w.spread*D2R;
+      const vx=Math.cos(a+off)*speed, vy=Math.sin(a+off)*speed;
+      this.projectiles.push(new Projectile(m.x,m.y,vx,vy,w,t));
+    }
+    Sound.fire();
+    this.cam.shake=Math.max(this.cam.shake, 4);
+    this.phase='flying';
+    UI.refresh();
+  },
+
+  explosionAt(x,y,w,owner){
+    this.terrain.crater(x,y,w.radius);
+    this.fx.burst(x,y,w.radius,['#ffdd55','#ff8833','#ff4422','#ffffff','#775533']);
+    for(let i=0;i<6;i++) this.fx.smoke(x+rand(-w.radius/2,w.radius/2), y+rand(-w.radius/2,0));
+    Sound.boom(w.radius>55);
+    this.cam.shake=Math.max(this.cam.shake, w.radius*0.28);
+    this.lastImpact={x,y,t:0};
+    for(const t of this.tanks){
+      if(!t.alive) continue;
+      const dx=t.x-x, dy=(t.y-8)-y, dist=Math.sqrt(dx*dx+dy*dy);
+      const eff = w.radius*1.45;
+      if(dist<eff){
+        const dmg = Math.round(w.dmg * (1-dist/eff));
+        if(dmg>0) this.applyDamage(t, dmg, false);
+        // 넉백
+        const kb = 240*(1-dist/eff);
+        const nx = dist>0.01 ? dx/dist : 0;
+        t.vx += nx*kb; t.vy += -Math.abs(kb)*0.55 - 40;
+        t.airborne=true;
+      }
+    }
+  },
+
+  applyDamage(t, dmg, isFall){
+    t.hp=Math.max(0, t.hp-dmg);
+    t.hitFlash=0.35;
+    this.fx.pop(t.x, t.y-34, '-'+dmg, isFall?'#ffb03e':'#ff3e3e');
+    if(t.hp<=0 && t.alive){
+      t.alive=false;
+      this.fx.burst(t.x, t.y-8, 60, ['#ffdd55','#ff8833','#ff4422','#888']);
+      Sound.boom(true);
+    }
+    UI.refresh();
+  },
+
+  drown(t){
+    t.alive=false; t.hp=0;
+    this.fx.splash(t.x);
+    Sound.splash();
+    this.fx.pop(t.x, WATER_Y-30, '풍덩!', '#7fd4ff');
+    UI.refresh();
+  },
+
+  splashAt(x){ this.fx.splash(x); Sound.splash(); },
+
+  // ---------- AI ----------
+  simulateShot(from, angleDeg, power, w){
+    const a = from.facing===1 ? -angleDeg*D2R : Math.PI+angleDeg*D2R;
+    const speed=power*POWER_TO_SPEED*w.speedMul;
+    let x=from.x+Math.cos(a)*30, y=from.y-10+Math.sin(a)*30;
+    let vx=Math.cos(a)*speed, vy=Math.sin(a)*speed;
+    const h=1/60;
+    for(let i=0;i<60*8;i++){
+      vx+=this.wind*WIND_ACCEL*h; vy+=GRAVITY*w.gravMul*h;
+      x+=vx*h; y+=vy*h;
+      if(x<-200||x>WORLD_W+200||y>WORLD_H+50) return null;
+      if(y>WATER_Y) return {x,y:WATER_Y};
+      if(x>=0&&x<WORLD_W&&y>=this.terrain.heightAt(x)) return {x,y};
+    }
+    return null;
+  },
+  aiDecide(){
+    const me=this.cur(), foe=this.foe();
+    me.facing = foe.x>me.x?1:-1;
+    // 특수탄: 상대 HP 40 이하 또는 남은 탄 있고 30% 확률
+    me.useSpecial = me.specialAmmo>0 && (foe.hp<=40 || Math.random()<0.3);
+    const w=me.weapon();
+    let best=null;
+    for(let ang=15; ang<=80; ang+=4){
+      for(let pow=22; pow<=100; pow+=4){
+        const hit=this.simulateShot(me,ang,pow,w);
+        if(!hit) continue;
+        const d=Math.abs(hit.x-foe.x)+Math.abs(hit.y-(foe.y-8))*0.4;
+        if(!best || d<best.d) best={ang,pow,d};
+      }
+    }
+    if(!best) best={ang:55, pow:70, d:999};
+    // 실수 확률(난이도): 파워/각도에 약간의 오차 부여
+    best.pow = clamp(best.pow + rand(-2.2,2.2), 12, 100);
+    best.ang = clamp(best.ang + rand(-1.2,1.2), 5, 85);
+    return best;
+  },
+
+  // ---------- 업데이트 ----------
+  update(dt){
+    this.time+=dt;
+    for(const c of this.clouds){ c.x+=c.v*dt; if(c.x>WORLD_W+220) c.x=-220; }
+    if(this.state!=='play'){ return; }
+
+    this.fx.update(dt);
+    if(this.lastImpact) this.lastImpact.t+=dt;
+    if(this.banner.t<3) this.banner.t+=dt;
+
+    for(const t of this.tanks) t.settle(this.terrain, dt, this);
+
+    // 사망으로 매치 종료 확인 (발사체 없을 때)
+    const alive=this.tanks.filter(t=>t.alive);
+    if(alive.length<=1 && this.projectiles.length===0 && this.phase!=='resolve'){
+      this.phase='resolve'; this.turnSwitchDelay=1.2;
+    }
+
+    switch(this.phase){
+      case 'aim': {
+        this.turnTimer-=dt;
+        if(this.turnTimer<=0){ this.showBanner('시간 초과!'); this.phase='resolve'; this.turnSwitchDelay=0.9; }
+        const t=this.cur();
+        if(Input.left)  t.move(-1,dt,this.terrain);
+        if(Input.right) t.move( 1,dt,this.terrain);
+        if(Input.angUp)   t.angle=clamp(t.angle+34*dt, 0, 85);
+        if(Input.angDown) t.angle=clamp(t.angle-34*dt, 0, 85);
+        this.camTarget=t;
+        break;
+      }
+      case 'charging': {
+        this.turnTimer-=dt;
+        this.power=clamp(this.power+62*dt, 0, 100);
+        if(this.turnTimer<=0 || this.power>=100){ this.fire(); }
+        break;
+      }
+      case 'aiThink': {
+        this.aiTimer+=dt;
+        const t=this.cur();
+        if(!this.aiPlan && this.aiTimer>0.9){ this.aiPlan=this.aiDecide(); UI.refresh(); }
+        if(this.aiPlan){
+          // 각도를 목표로 서서히 이동
+          const diff=this.aiPlan.ang-t.angle;
+          if(Math.abs(diff)>0.8) t.angle+=Math.sign(diff)*Math.min(Math.abs(diff), 40*dt);
+          else if(this.aiTimer>1.6){
+            this.power=clamp(this.power+70*dt, 0, this.aiPlan.pow);
+            if(this.power>=this.aiPlan.pow-0.5) this.fire();
+          }
+        }
+        this.camTarget=t;
+        break;
+      }
+      case 'flying': {
+        for(const p of this.projectiles) p.step(dt,this);
+        this.projectiles=this.projectiles.filter(p=>!p.dead);
+        if(this.projectiles.length){
+          // 카메라: 첫 발사체 추적
+          this.camTarget=this.projectiles[0];
+        } else {
+          this.phase='resolve'; this.turnSwitchDelay=1.15;
+        }
+        break;
+      }
+      case 'resolve': {
+        this.turnSwitchDelay-=dt;
+        const anyAirborne=this.tanks.some(t=>t.alive&&t.airborne);
+        if(this.turnSwitchDelay<=0 && !anyAirborne){
+          const alive2=this.tanks.filter(t=>t.alive);
+          if(alive2.length<=1) this.endMatch();
+          else this.nextTurn();
+        }
+        break;
+      }
+    }
+
+    // ---------- 카메라 ----------
+    const vw=canvas.width, vh=canvas.height;
+    const zoomH = vh/WORLD_H, zoomW = vw/WORLD_W;
+    this.cam.zoom = Math.max(zoomH, Math.min(zoomW*2.2, zoomH*1.35));
+    if(this.cam.zoom*WORLD_W < vw) this.cam.zoom = vw/WORLD_W;
+    const viewW=vw/this.cam.zoom, viewH=vh/this.cam.zoom;
+    let tx=this.camTarget?this.camTarget.x:WORLD_W/2;
+    let ty=this.camTarget?this.camTarget.y:WORLD_H*0.6;
+    tx=clamp(tx, viewW/2, WORLD_W-viewW/2);
+    ty=clamp(ty, viewH/2, WORLD_H-viewH/2);
+    const k=Math.min(1, dt*3.2);
+    this.cam.x=lerp(this.cam.x, tx, k);
+    this.cam.y=lerp(this.cam.y, ty, k);
+    this.cam.shake=Math.max(0, this.cam.shake - dt*26);
+
+    UI.tick();
+  },
+};
+
+// ================================================================
+//                          렌더링
+// ================================================================
+const Render = {
+  draw(){
+    const vw=canvas.width, vh=canvas.height;
+    ctx.clearRect(0,0,vw,vh);
+    this.sky(vw,vh);
+    if(Game.state==='title'||Game.state==='select'){ return; }
+
+    const cam=Game.cam;
+    const sx=rand(-cam.shake,cam.shake), sy=rand(-cam.shake,cam.shake);
+    ctx.save();
+    ctx.translate(vw/2+sx, vh/2+sy);
+    ctx.scale(cam.zoom, cam.zoom);
+    ctx.translate(-cam.x, -cam.y);
+
+    this.mountains();
+    this.terrain();
+    for(const t of Game.tanks) this.tank(t);
+    this.projectiles();
+    this.effects();
+    this.water();
+    ctx.restore();
+  },
+
+  sky(vw,vh){
+    const g=ctx.createLinearGradient(0,0,0,vh);
+    g.addColorStop(0,'#6fc1f2'); g.addColorStop(0.55,'#b8e4fb'); g.addColorStop(1,'#e6f7ff');
+    ctx.fillStyle=g; ctx.fillRect(0,0,vw,vh);
+    // 해
+    ctx.save();
+    ctx.globalAlpha=0.9;
+    const sunX=vw*0.82, sunY=vh*0.16;
+    const rg=ctx.createRadialGradient(sunX,sunY,4,sunX,sunY,60);
+    rg.addColorStop(0,'#fff7ae'); rg.addColorStop(0.5,'#ffe158'); rg.addColorStop(1,'rgba(255,225,88,0)');
+    ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(sunX,sunY,60,0,6.283); ctx.fill();
+    ctx.restore();
+    // 구름 (화면 좌표 고정 비율)
+    ctx.save();
+    for(const c of Game.clouds){
+      const x=(c.x/WORLD_W)*vw, y=c.y*vh;
+      ctx.globalAlpha=0.85;
+      ctx.fillStyle='#ffffff';
+      const s=c.s*(vh/500);
+      ctx.beginPath();
+      ctx.arc(x,y,18*s,0,6.283); ctx.arc(x+20*s,y-8*s,15*s,0,6.283);
+      ctx.arc(x+40*s,y,17*s,0,6.283); ctx.arc(x+20*s,y+6*s,16*s,0,6.283);
+      ctx.fill();
+    }
+    ctx.restore();
+  },
+
+  mountains(){
+    ctx.save();
+    ctx.globalAlpha=0.45;
+    ctx.fillStyle='#8fb8d9';
+    ctx.beginPath(); ctx.moveTo(0,WORLD_H*0.55);
+    for(let x=0;x<=WORLD_W;x+=60){
+      ctx.lineTo(x, WORLD_H*0.42 + Math.sin(x*0.008+2)*60 + Math.sin(x*0.02)*24);
+    }
+    ctx.lineTo(WORLD_W,WORLD_H); ctx.lineTo(0,WORLD_H); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  },
+
+  terrain(){
+    const g=Game.terrain.ground;
+    // 흙
+    const grd=ctx.createLinearGradient(0,WORLD_H*0.3,0,WORLD_H);
+    grd.addColorStop(0,'#b5793c'); grd.addColorStop(0.6,'#8e5a28'); grd.addColorStop(1,'#6d411a');
+    ctx.fillStyle=grd;
+    ctx.beginPath(); ctx.moveTo(0,WORLD_H);
+    for(let x=0;x<WORLD_W;x+=2) ctx.lineTo(x,g[x]);
+    ctx.lineTo(WORLD_W,WORLD_H); ctx.closePath(); ctx.fill();
+    // 흙 알갱이
+    ctx.fillStyle='rgba(60,35,10,0.25)';
+    for(let i=0;i<160;i++){
+      const x=Math.floor(hash(i*3.7)*WORLD_W);
+      const depth=hash(i*7.1)*140+18;
+      const y=g[x]+depth;
+      if(y<WORLD_H-8) ctx.fillRect(x,y,3,3);
+    }
+    // 잔디
+    ctx.lineWidth=7; ctx.strokeStyle='#4fae3d'; ctx.lineJoin='round';
+    ctx.beginPath();
+    for(let x=0;x<WORLD_W;x+=2){ x===0?ctx.moveTo(x,g[x]-1):ctx.lineTo(x,g[x]-1); }
+    ctx.stroke();
+    ctx.lineWidth=3; ctx.strokeStyle='#7ed957';
+    ctx.beginPath();
+    for(let x=0;x<WORLD_W;x+=2){ x===0?ctx.moveTo(x,g[x]-3):ctx.lineTo(x,g[x]-3); }
+    ctx.stroke();
+  },
+
+  water(){
+    ctx.save();
+    const t=Game.time;
+    ctx.globalAlpha=0.85;
+    const grd=ctx.createLinearGradient(0,WATER_Y,0,WORLD_H);
+    grd.addColorStop(0,'#48a7e8'); grd.addColorStop(1,'#1e5f9e');
+    ctx.fillStyle=grd;
+    ctx.beginPath(); ctx.moveTo(0,WORLD_H); ctx.lineTo(0,WATER_Y);
+    for(let x=0;x<=WORLD_W;x+=24) ctx.lineTo(x, WATER_Y + Math.sin(x*0.03+t*2.2)*3);
+    ctx.lineTo(WORLD_W,WORLD_H); ctx.closePath(); ctx.fill();
+    ctx.globalAlpha=0.5; ctx.strokeStyle='#bfe7ff'; ctx.lineWidth=2;
+    ctx.beginPath();
+    for(let x=0;x<=WORLD_W;x+=24){ const y=WATER_Y+Math.sin(x*0.03+t*2.2)*3; x===0?ctx.moveTo(x,y):ctx.lineTo(x,y); }
+    ctx.stroke();
+    ctx.restore();
+  },
+
+  tank(t){
+    if(!t.alive) return;
+    ctx.save();
+    ctx.translate(t.x, t.y);
+    ctx.rotate(t.tilt);
+    const c=t.color;
+    const dark=this.shade(c,-38), light=this.shade(c,40);
+    // 포신
+    ctx.save();
+    ctx.translate(0,-10);
+    ctx.rotate(t.facing===1 ? -t.angle*D2R : Math.PI+t.angle*D2R);
+    ctx.fillStyle=dark;
+    this.rr(2,-4.5,30,9,4); ctx.fill();
+    ctx.fillStyle=this.shade(c,-15);
+    this.rr(2,-4.5,30,4,2); ctx.fill();
+    ctx.restore();
+    // 무한궤도
+    ctx.fillStyle='#3b3b46';
+    this.rr(-20,-8,40,12,6); ctx.fill();
+    ctx.fillStyle='#23232b';
+    for(let i=-14;i<=14;i+=7){ ctx.beginPath(); ctx.arc(i,-2,3.4,0,6.283); ctx.fill(); }
+    // 차체
+    const bodyGrd=ctx.createLinearGradient(0,-24,0,-6);
+    bodyGrd.addColorStop(0,light); bodyGrd.addColorStop(1,c);
+    ctx.fillStyle=bodyGrd;
+    this.rr(-17,-20,34,13,6); ctx.fill();
+    ctx.strokeStyle=dark; ctx.lineWidth=2;
+    this.rr(-17,-20,34,13,6); ctx.stroke();
+    // 포탑 돔
+    ctx.fillStyle=bodyGrd;
+    ctx.beginPath(); ctx.arc(0,-19,9.5,Math.PI,0); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle=dark; ctx.beginPath(); ctx.arc(0,-19,9.5,Math.PI,0); ctx.stroke();
+    // 해치 + 안테나
+    ctx.fillStyle=light; ctx.beginPath(); ctx.arc(0,-22,3.4,0,6.283); ctx.fill();
+    ctx.strokeStyle=dark; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(-10*t.facing,-24); ctx.lineTo(-13*t.facing,-34); ctx.stroke();
+    ctx.fillStyle='#ffd23e'; ctx.beginPath(); ctx.arc(-13*t.facing,-35,2,0,6.283); ctx.fill();
+    // 피격 플래시
+    if(t.hitFlash>0){ ctx.globalAlpha=Math.min(0.7,t.hitFlash*2); ctx.fillStyle='#fff'; this.rr(-20,-28,40,24,8); ctx.fill(); ctx.globalAlpha=1; }
+    ctx.restore();
+
+    // 이름 + HP바 (기울기 미적용)
+    ctx.save();
+    ctx.translate(t.x, t.y);
+    ctx.font='bold 11px Trebuchet MS, sans-serif';
+    ctx.textAlign='center';
+    ctx.lineWidth=3; ctx.strokeStyle='rgba(255,255,255,0.85)';
+    ctx.strokeText(t.name, 0, -44);
+    ctx.fillStyle=t.team===0?'#0b62a8':'#c0281a';
+    ctx.fillText(t.name, 0, -44);
+    ctx.fillStyle='rgba(0,0,0,0.35)'; this.rr(-19,-41,38,6,3); ctx.fill();
+    ctx.fillStyle=t.hp>t.maxHp*0.35?'#57d13e':'#ff5030';
+    const w=36*(t.hp/t.maxHp);
+    if(w>0.5){ this.rr(-18,-40,w,4,2); ctx.fill(); }
+    // 현재 턴 표시 화살표
+    if(Game.state==='play' && Game.cur()===t && (Game.phase==='aim'||Game.phase==='charging'||Game.phase==='aiThink')){
+      const bob=Math.sin(Game.time*5)*3;
+      ctx.fillStyle='#ffd23e'; ctx.strokeStyle='#8a5a00'; ctx.lineWidth=1.5;
+      ctx.beginPath();
+      ctx.moveTo(0,-56+bob); ctx.lineTo(-7,-66+bob); ctx.lineTo(7,-66+bob); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+
+    // 조준 가이드 (사람 차례, 조준 중)
+    if(Game.state==='play' && Game.cur()===t && !t.isAI && (Game.phase==='aim'||Game.phase==='charging')){
+      const a=t.barrelWorldAngle(), m=t.muzzle();
+      ctx.save();
+      ctx.setLineDash([3,7]);
+      ctx.strokeStyle='rgba(255,255,255,0.75)'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.moveTo(m.x,m.y);
+      ctx.lineTo(m.x+Math.cos(a)*110, m.y+Math.sin(a)*110);
+      ctx.stroke();
+      ctx.restore();
+    }
+  },
+
+  projectiles(){
+    for(const p of Game.projectiles){
+      // 궤적
+      ctx.save();
+      for(let i=0;i<p.trail.length;i++){
+        const tr=p.trail[i];
+        ctx.globalAlpha=i/p.trail.length*0.5;
+        ctx.fillStyle='#fff';
+        ctx.beginPath(); ctx.arc(tr.x,tr.y,2.4,0,6.283); ctx.fill();
+      }
+      ctx.restore();
+      // 탄체
+      ctx.save();
+      ctx.translate(p.x,p.y);
+      ctx.rotate(Math.atan2(p.vy,p.vx));
+      ctx.fillStyle='#2f2f38';
+      ctx.beginPath(); ctx.ellipse(0,0,7,4.5,0,0,6.283); ctx.fill();
+      ctx.fillStyle='#ff8833';
+      ctx.beginPath(); ctx.ellipse(-6,0,4,2.6,0,0,6.283); ctx.fill();
+      ctx.restore();
+    }
+    // 직전 착탄 지점 마커
+    const li=Game.lastImpact;
+    if(li && li.t<4 && Game.projectiles.length===0){
+      ctx.save();
+      ctx.globalAlpha=Math.max(0, 1-li.t/4);
+      ctx.strokeStyle='#ff3e3e'; ctx.lineWidth=2.5;
+      ctx.beginPath();
+      ctx.moveTo(li.x-8,li.y-8); ctx.lineTo(li.x+8,li.y+8);
+      ctx.moveTo(li.x+8,li.y-8); ctx.lineTo(li.x-8,li.y+8);
+      ctx.stroke();
+      ctx.restore();
+    }
+  },
+
+  effects(){
+    const fx=Game.fx;
+    for(const s of fx.smokes){
+      ctx.save(); ctx.globalAlpha=0.35*(1-s.t/s.life);
+      ctx.fillStyle='#9a9a9a';
+      ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,6.283); ctx.fill(); ctx.restore();
+    }
+    for(const p of fx.parts){
+      ctx.save(); ctx.globalAlpha=1-p.t/p.life;
+      ctx.fillStyle=p.c; ctx.fillRect(p.x-p.size/2,p.y-p.size/2,p.size,p.size);
+      ctx.restore();
+    }
+    for(const r of fx.rings){
+      const k=r.t/0.45;
+      ctx.save(); ctx.globalAlpha=(1-k)*0.8;
+      ctx.strokeStyle='#fff'; ctx.lineWidth=4*(1-k)+1;
+      ctx.beginPath(); ctx.arc(r.x,r.y,r.r+(r.max-r.r)*k,0,6.283); ctx.stroke();
+      ctx.restore();
+    }
+    ctx.save();
+    ctx.textAlign='center'; ctx.font='bold 20px Trebuchet MS, sans-serif';
+    for(const p of fx.pops){
+      const k=p.t/1.2;
+      ctx.globalAlpha=1-k;
+      ctx.lineWidth=4; ctx.strokeStyle='rgba(255,255,255,0.9)';
+      ctx.strokeText(p.text, p.x, p.y-36*k);
+      ctx.fillStyle=p.color;
+      ctx.fillText(p.text, p.x, p.y-36*k);
+    }
+    ctx.restore();
+  },
+
+  rr(x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+  },
+  shade(hex, amt){
+    const n=parseInt(hex.slice(1),16);
+    let r=(n>>16)+amt, g=((n>>8)&0xff)+amt, b=(n&0xff)+amt;
+    r=clamp(r,0,255); g=clamp(g,0,255); b=clamp(b,0,255);
+    return '#'+((1<<24)+(r<<16)+(g<<8)+b).toString(16).slice(1);
+  },
+};
+
+// ================================================================
+//                        입력 / UI
+// ================================================================
+const Input = { left:false, right:false, angUp:false, angDown:false };
+
+const UI = {
+  els:{},
+  init(){
+    const ids=['titleScreen','selectScreen','hud','controls','overScreen','banner','btnMute',
+      'btn1p','btn2p','tankCards','btnStart','selectTitle','btnLeft','btnRight','btnAngUp','btnAngDown',
+      'angleVal','btnWeapon','btnFire','powerFill','fuelFill','windArrow','windVal','turnTimer',
+      'hpP1','hpP2','btnAgain','btnMenu'];
+    for(const id of ids) this.els[id]=document.getElementById(id);
+
+    this.els.btn1p.addEventListener('click', ()=>{ Sound.init(); Sound.click(); Game.mode='1p'; this.openSelect(); });
+    this.els.btn2p.addEventListener('click', ()=>{ Sound.init(); Sound.click(); Game.mode='2p'; this.openSelect(); });
+    this.els.btnStart.addEventListener('click', ()=>{
+      Sound.click();
+      if(Game.mode==='2p' && Game.selStep===0){
+        Game.selP1=this.selIdx; Game.selStep=1; this.selIdx=-1;
+        this.renderCards('P2 탱크 선택');
+        this.els.btnStart.disabled=true;
+        return;
+      }
+      if(Game.mode==='2p'){ Game.selP2=this.selIdx; } else { Game.selP1=this.selIdx; }
+      this.show(null); Game.newMatch();
+    });
+    this.els.btnAgain.addEventListener('click', ()=>{ Sound.click(); this.show(null); Game.newMatch(); });
+    this.els.btnMenu.addEventListener('click', ()=>{ Sound.click(); Game.state='title'; this.hidePlayUI(); this.show('titleScreen'); });
+    this.els.btnMute.addEventListener('click', ()=>{ Sound.muted=!Sound.muted; this.els.btnMute.textContent=Sound.muted?'🔇':'🔊'; });
+
+    // 홀드 버튼
+    this.hold(this.els.btnLeft,  v=>Input.left=v);
+    this.hold(this.els.btnRight, v=>Input.right=v);
+    this.hold(this.els.btnAngUp,   v=>Input.angUp=v);
+    this.hold(this.els.btnAngDown, v=>Input.angDown=v);
+
+    // 무기 전환
+    this.els.btnWeapon.addEventListener('click', ()=>{
+      const t=Game.cur();
+      if(Game.state!=='play' || t.isAI || Game.phase!=='aim') return;
+      if(t.specialAmmo>0){ t.useSpecial=!t.useSpecial; Sound.click(); this.refresh(); }
+    });
+
+    // 발사(홀드 차지)
+    const fireDown=e=>{ e.preventDefault();
+      Sound.init();
+      if(Game.state!=='play' || Game.cur().isAI || Game.phase!=='aim') return;
+      Game.phase='charging'; Game.power=0;
+      this.els.btnFire.classList.add('pressed');
+    };
+    const fireUp=e=>{ e.preventDefault();
+      this.els.btnFire.classList.remove('pressed');
+      if(Game.state==='play' && Game.phase==='charging' && !Game.cur().isAI) Game.fire();
+    };
+    this.els.btnFire.addEventListener('pointerdown', fireDown);
+    this.els.btnFire.addEventListener('pointerup', fireUp);
+    this.els.btnFire.addEventListener('pointercancel', fireUp);
+    this.els.btnFire.addEventListener('pointerleave', e=>{ if(Game.phase==='charging') fireUp(e); });
+
+    // 키보드 (데스크톱 편의)
+    window.addEventListener('keydown', e=>{
+      if(Game.state!=='play' || Game.cur().isAI) return;
+      if(e.code==='ArrowLeft') Input.left=true;
+      if(e.code==='ArrowRight') Input.right=true;
+      if(e.code==='ArrowUp') Input.angUp=true;
+      if(e.code==='ArrowDown') Input.angDown=true;
+      if(e.code==='Space' && Game.phase==='aim' && !e.repeat){ Sound.init(); Game.phase='charging'; Game.power=0; }
+      if(e.code==='KeyX' && Game.phase==='aim') this.els.btnWeapon.click();
+    });
+    window.addEventListener('keyup', e=>{
+      if(e.code==='ArrowLeft') Input.left=false;
+      if(e.code==='ArrowRight') Input.right=false;
+      if(e.code==='ArrowUp') Input.angUp=false;
+      if(e.code==='ArrowDown') Input.angDown=false;
+      if(e.code==='Space' && Game.phase==='charging') Game.fire();
+    });
+  },
+
+  hold(el, setter){
+    const down=e=>{ e.preventDefault(); Sound.init(); setter(true); el.classList.add('pressed'); };
+    const up=e=>{ e.preventDefault(); setter(false); el.classList.remove('pressed'); };
+    el.addEventListener('pointerdown', down);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+    el.addEventListener('pointerleave', up);
+  },
+
+  show(id){
+    for(const s of ['titleScreen','selectScreen','overScreen']) this.els[s].classList.add('hidden');
+    if(id) this.els[id].classList.remove('hidden');
+  },
+
+  openSelect(){
+    Game.selStep=0; this.selIdx=-1;
+    this.show('selectScreen');
+    this.renderCards(Game.mode==='2p' ? 'P1 탱크 선택' : '탱크 선택');
+    this.els.btnStart.disabled=true;
+  },
+
+  renderCards(title){
+    this.els.selectTitle.textContent=title;
+    const box=this.els.tankCards; box.innerHTML='';
+    const team = (Game.mode==='2p' && Game.selStep===1)?1:0;
+    TANK_TYPES.forEach((tt,i)=>{
+      const card=document.createElement('div');
+      card.className='tank-card';
+      const cv=document.createElement('canvas'); cv.width=140; cv.height=64;
+      card.appendChild(cv);
+      const n=document.createElement('div'); n.className='tname'; n.textContent=tt.name; card.appendChild(n);
+      const d=document.createElement('div'); d.className='tdesc';
+      d.textContent=`${tt.desc.replace('\n',' ')} (HP ${tt.hp} · 특수 ${tt.special.label}×${tt.special.ammo})`;
+      card.appendChild(d);
+      this.drawCardTank(cv, tt.bodyColor[team]);
+      card.addEventListener('click', ()=>{
+        Sound.init(); Sound.click();
+        box.querySelectorAll('.tank-card').forEach(c=>c.classList.remove('sel'));
+        card.classList.add('sel');
+        this.selIdx=i; this.els.btnStart.disabled=false;
+      });
+      box.appendChild(card);
+    });
+  },
+
+  drawCardTank(cv, color){
+    const c=cv.getContext('2d');
+    c.clearRect(0,0,cv.width,cv.height);
+    c.save();
+    c.translate(cv.width/2, cv.height-12);
+    c.scale(1.4,1.4);
+    const dark=Render.shade.call({},color,-38)||'#333';
+    // 간이 렌더 (Render.rr는 메인 ctx 전용이라 직접 그림)
+    c.save(); c.translate(0,-10); c.rotate(-40*D2R);
+    c.fillStyle=Render.shade(color,-38);
+    c.fillRect(2,-4,26,8);
+    c.restore();
+    c.fillStyle='#3b3b46';
+    c.beginPath(); c.roundRect(-18,-8,36,11,5); c.fill();
+    c.fillStyle=color;
+    c.beginPath(); c.roundRect(-15,-19,30,12,5); c.fill();
+    c.beginPath(); c.arc(0,-18,8,Math.PI,0); c.fill();
+    c.strokeStyle=Render.shade(color,-38); c.lineWidth=1.6;
+    c.beginPath(); c.roundRect(-15,-19,30,12,5); c.stroke();
+    c.restore();
+  },
+
+  enterPlay(){
+    this.els.hud.classList.remove('hidden');
+    this.els.controls.classList.remove('hidden');
+    this.els.btnMute.classList.remove('hidden');
+    this.refresh();
+  },
+  hidePlayUI(){
+    this.els.hud.classList.add('hidden');
+    this.els.controls.classList.add('hidden');
+    this.els.banner.classList.add('hidden');
+  },
+
+  refresh(){
+    if(Game.state!=='play' && Game.state!=='over') return;
+    const [t1,t2]=Game.tanks;
+    this.setHp(this.els.hpP1, t1);
+    this.setHp(this.els.hpP2, t2);
+    // 바람
+    const w=Game.wind;
+    this.els.windVal.textContent = '바람 '+Math.abs(w);
+    this.els.windArrow.textContent = w>1?'▶':(w<-1?'◀':'●');
+    this.els.windArrow.style.transform=`scale(${1+Math.abs(w)/28})`;
+    this.els.windArrow.style.color = Math.abs(w)>18?'#d8321e':'#0b62a8';
+    // 무기
+    const cur=Game.cur();
+    const wp=cur.weapon();
+    this.els.btnWeapon.textContent = cur.useSpecial&&cur.specialAmmo>0 ? `★${wp.label}(${cur.specialAmmo})` : wp.label;
+    // 컨트롤 표시/숨김 (AI 턴엔 비활성 느낌)
+    this.els.controls.style.opacity = cur.isAI?0.35:1;
+    this.els.controls.style.pointerEvents = cur.isAI?'none':'auto';
+  },
+
+  setHp(panel, t){
+    panel.querySelector('.pname').textContent=t.name;
+    panel.querySelector('.hpfill').style.width=Math.max(0,t.hp/t.maxHp*100)+'%';
+  },
+
+  tick(){
+    if(Game.state!=='play') return;
+    const t=Game.cur();
+    this.els.angleVal.textContent=Math.round(t.angle)+'°';
+    this.els.fuelFill.style.width=(t.fuel/t.type.fuel*100)+'%';
+    this.els.powerFill.style.width=Game.power+'%';
+    this.els.turnTimer.textContent = (Game.phase==='aim'||Game.phase==='charging') ? Math.ceil(Game.turnTimer) : '—';
+    // 배너
+    if(Game.banner.t<1.6){
+      this.els.banner.textContent=Game.banner.text;
+      this.els.banner.classList.remove('hidden');
+    } else this.els.banner.classList.add('hidden');
+  },
+};
+
+// ================================================================
+//                        부팅 / 루프
+// ================================================================
+function resize(){
+  const dpr=Math.min(window.devicePixelRatio||1, 2);
+  canvas.width=Math.round(innerWidth*dpr);
+  canvas.height=Math.round(innerHeight*dpr);
+  canvas.style.width=innerWidth+'px';
+  canvas.style.height=innerHeight+'px';
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', ()=>setTimeout(resize,150));
+resize();
+
+// 구름 초기화
+for(let i=0;i<5;i++){
+  Game.clouds.push({x:rand(0,WORLD_W), y:rand(0.05,0.3), s:rand(0.7,1.4), v:rand(6,16)});
+}
+
+UI.init();
+
+let last=performance.now();
+function loop(now){
+  const dt=Math.min(0.05,(now-last)/1000);
+  last=now;
+  Game.update(dt);
+  Render.draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);

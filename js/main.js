@@ -6,12 +6,13 @@
 'use strict';
 
 // ---------------- 상수 ----------------
-const WORLD_W = 1700;          // 월드 폭 (px)
+const WORLD_W = 1500;          // 월드 폭 (px)
 const WORLD_H = 960;           // 월드 높이
 const WATER_Y = WORLD_H - 46;  // 수면 y
 const GRAVITY = 300;           // px/s^2
-const WIND_ACCEL = 2.0;        // 바람 1당 가속도
-const MAX_SPEED = 650;         // 파워 100일 때 초기 속도 (45도 무풍 사거리 ≈ 1410px, 맵 끝까지)
+const WIND_ACCEL = 1.5;        // 바람 1당 가속도
+const MAX_SPEED = 730;         // 파워 100 초기 속도 — 최강 역풍(22)에서도 가장 짧은 무기가 벽→벽(1476px) 도달하도록 산출
+const WIND_MAX = 22;           // 바람 최대 세기
 // 사거리는 속도²에 비례하므로, 속도를 √파워에 비례시켜 사거리가 파워에 정비례하게 한다
 const speedFor = (power, w) => MAX_SPEED * Math.sqrt(clamp(power,8,100)/100) * w.speedMul;
 const TURN_TIME = 30;          // 턴 제한(초)
@@ -42,7 +43,7 @@ const TANK_TYPES = [
     hp:115, fuel:85, bodyColor:['#7d6ae0','#d64a7d'],
     weapons:[
       { label:'헤비탄', icon:'⬤', dmg:31, radius:50, speedMul:1.0, gravMul:1.05, count:1, spread:0 },
-      { label:'메가봄', icon:'✸', dmg:44, radius:66, speedMul:1.0, gravMul:1.08, count:1, spread:0, ammo:2 },
+      { label:'메가봄', icon:'✸', dmg:44, radius:66, speedMul:1.0, gravMul:1.05, count:1, spread:0, ammo:2 },
       { label:'클러스터', icon:'✦', dmg:14, radius:26, speedMul:1.0, gravMul:1.05, count:1, spread:0, ammo:2, cluster:5 },
     ],
   },
@@ -349,7 +350,7 @@ const Game = {
     if(!first){
       // 바람은 턴이 지날수록 범위가 넓어지고, 이전 값에서 점진적으로 변한다
       this.turnCount++;
-      const cap = Math.min(28, 5 + this.turnCount*2.5);
+      const cap = Math.min(WIND_MAX, 5 + this.turnCount*2.5);
       const delta = Math.min(12, 3 + this.turnCount*1.2);
       this.wind = Math.round(clamp(this.wind + rand(-delta,delta), -cap, cap));
     }

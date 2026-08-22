@@ -17,6 +17,27 @@ const WIND_MAX = 22;           // 바람 최대 세기
 const speedFor = (power, w) => MAX_SPEED * Math.sqrt(clamp(power,8,100)/100) * w.speedMul;
 const TURN_TIME = 30;          // 턴 제한(초)
 const TANK_R = 16;             // 탱크 피격 반경
+const CLOUD_DRAG = 1.7;        // 장애물 구름 내부 항력 (초당 속도 감쇠 비율)
+
+// ---------------- 장애물 구름 패턴 ----------------
+// 각 패턴은 {x,y,rx,ry,vx?,x0?,x1?} 타원 목록을 반환. k = 두께 배율
+const CLOUD_PATTERNS = {
+  none:   k => [],
+  single: k => [ {x:WORLD_W*0.5, y:WORLD_H*0.36, rx:150*k, ry:52*k} ],
+  band:   k => { const a=[]; for(let i=0;i<5;i++) a.push({x:WORLD_W*(0.22+i*0.14), y:WORLD_H*0.42+Math.sin(i)*14, rx:120*k, ry:36*k}); return a; },
+  wall:   k => { const gap=1+Math.floor(Math.random()*2); const a=[];   // 세로 벽, 한 칸 비어 있음
+                 for(let i=0;i<4;i++){ if(i===gap) continue; a.push({x:WORLD_W*0.5+(i%2?18:-18), y:WORLD_H*(0.2+i*0.11), rx:95*k, ry:40*k}); }
+                 return a; },
+  stairs: k => [ {x:WORLD_W*0.3, y:WORLD_H*0.5, rx:105*k, ry:40*k}, {x:WORLD_W*0.5, y:WORLD_H*0.37, rx:105*k, ry:40*k},
+                 {x:WORLD_W*0.7, y:WORLD_H*0.25, rx:105*k, ry:40*k} ],
+  moving: k => [ {x:WORLD_W*0.5, y:WORLD_H*0.36, rx:130*k, ry:48*k, vx:70, x0:WORLD_W*0.3, x1:WORLD_W*0.7},
+                 {x:WORLD_W*0.45, y:WORLD_H*0.2, rx:100*k, ry:38*k, vx:-55, x0:WORLD_W*0.25, x1:WORLD_W*0.75} ],
+  combo:  k => [ {x:WORLD_W*0.5, y:WORLD_H*0.28, rx:150*k, ry:50*k} ].concat(
+                 [0,1,2].map(i=>({x:WORLD_W*(0.32+i*0.18), y:WORLD_H*0.5, rx:110*k, ry:34*k})) ),
+};
+const CLOUD_PATTERN_LIST = ['single','band','wall','stairs','moving','combo'];
+// 점 (x,y)가 구름 안인지
+function inCloud(c, x, y){ const dx=(x-c.x)/c.rx, dy=(y-c.y)/c.ry; return dx*dx+dy*dy < 1; }
 
 // ---------------- 탱크 타입 ----------------
 const TANK_TYPES = [
@@ -257,6 +278,15 @@ class Projectile {
         const na=cur+clamp(diff, -this.weapon.homing*h, this.weapon.homing*h);
         this.vx=Math.cos(na)*sp; this.vy=Math.sin(na)*sp;
       }
+      // 장애물 구름 항력: 통과는 되지만 속도가 빠르게 줄어든다
+      for(const o of game.obstacles){
+        if(inCloud(o,this.x,this.y)){
+          const f=Math.max(0, 1-CLOUD_DRAG*h); this.vx*=f; this.vy*=f;
+          if(!this.inCloudNow){ o.wobble=1; game.fx.puff(this.x,this.y); }
+          this.inCloudNow=true;
+        }
+      }
+      if(!game.obstacles.some(o=>inCloud(o,this.x,this.y))) this.inCloudNow=false;
       this.x += this.vx*h; this.y += this.vy*h;
       // 월드 밖
       if(this.x<-250 || this.x>WORLD_W+250 || this.y>WORLD_H+60){ this.dead=true; return; }
@@ -295,6 +325,7 @@ class Projectile {
 class FX {
   constructor(){ this.parts=[]; this.pops=[]; this.rings=[]; this.smokes=[]; this.flashes=[]; }
   flash(x,y,a){ this.flashes.push({x,y,a,t:0}); }
+  puff(x,y){ for(let i=0;i<6;i++) this.smokes.push({x:x+rand(-8,8),y:y+rand(-6,6),r:rand(4,8),t:0,life:rand(0.4,0.7),white:true}); }
   burst(x,y,r,colors){
     for(let i=0;i<Math.min(46, r*0.9);i++){
       const a=rand(0,6.283), sp=rand(40, r*7);
@@ -341,7 +372,7 @@ const Game = {
   cam:{x:WORLD_W/2, y:WORLD_H/2, zoom:1, shake:0},
   camTarget:null,
   clouds:[], time:0,
-  theme:THEMES.grass, props:[], ambient:[],
+  theme:THEMES.grass, props:[], ambient:[], obstacles:[],
   selP1:0, selP2:0, selStep:0,
   aiTimer:0, aiPlan:null, aiShots:0,
   banner:{text:'', t:99},
@@ -354,6 +385,10 @@ const Game = {
     this.terrain = new Terrain();
     this.projectiles=[]; this.fx=new FX();
     this.initAmbient();
+    // 장애물 구름: 지정 패턴 또는 (빠른 대전) 50% 확률 랜덤
+    let pat = opts.clouds;
+    if(pat===undefined) pat = Math.random()<0.5 ? 'none' : CLOUD_PATTERN_LIST[Math.floor(Math.random()*CLOUD_PATTERN_LIST.length)];
+    this.obstacles = (CLOUD_PATTERNS[pat]||CLOUD_PATTERNS.none)(opts.cloudK||1).map(c=>Object.assign({wobble:0, pat}, c));
     this.aiShots = 0; this.turnCount = 0;
     const x1 = rand(140, 320), x2 = rand(WORLD_W-320, WORLD_W-140);
     const t1 = new Tank(this.selP1, 0, x1, 'P1 · '+TANK_TYPES[this.selP1].name, false);
@@ -525,6 +560,7 @@ const Game = {
     const h=1/60;
     for(let i=0;i<60*8;i++){
       vx+=this.wind*WIND_ACCEL*h; vy+=GRAVITY*w.gravMul*h;
+      for(const o of this.obstacles){ if(inCloud(o,x,y)){ const f=Math.max(0,1-CLOUD_DRAG*h); vx*=f; vy*=f; } }
       x+=vx*h; y+=vy*h;
       if(x<-200||x>WORLD_W+200||y>WORLD_H+50) return null;
       if(y>WATER_Y) return {x,y:WATER_Y};
@@ -566,6 +602,10 @@ const Game = {
   update(dt){
     this.time+=dt;
     for(const c of this.clouds){ c.x+=c.v*dt; if(c.x>WORLD_W+220) c.x=-220; }
+    for(const o of this.obstacles){
+      if(o.vx){ o.x+=o.vx*dt; if(o.x<o.x0){ o.x=o.x0; o.vx=Math.abs(o.vx); } if(o.x>o.x1){ o.x=o.x1; o.vx=-Math.abs(o.vx); } }
+      if(o.wobble>0) o.wobble=Math.max(0,o.wobble-dt*2.5);
+    }
     if(this.state!=='play'){ return; }
 
     this.fx.update(dt);
@@ -679,6 +719,7 @@ const Render = {
     this.props();
     for(const t of Game.tanks) this.tank(t);
     this.projectiles();
+    this.obstacleClouds();
     this.effects();
     this.water();
     this.powerGauge();
@@ -799,6 +840,34 @@ const Render = {
       }
     }
     ctx.restore();
+  },
+
+  // 장애물 구름 (배경 구름과 구분: 진하고 외곽선+그림자, 맞으면 출렁임)
+  obstacleClouds(){
+    const th=Game.theme;
+    for(const o of Game.obstacles){
+      const wob=1+Math.sin(Game.time*14)*0.06*o.wobble;
+      ctx.save();
+      ctx.translate(o.x,o.y); ctx.scale(wob, 1/wob);
+      const blobs=[];
+      const n=Math.max(4, Math.round(o.rx/32));
+      for(let i=0;i<n;i++){
+        const t=(i/(n-1))*2-1;             // -1..1
+        const bx=t*o.rx*0.78, by=Math.sin(i*2.3)*o.ry*0.25;
+        const r=o.ry*(0.75+0.35*(1-Math.abs(t)))+4;
+        blobs.push([bx,by,r]);
+      }
+      const draw=(dx,dy,rk)=>{ ctx.beginPath(); for(const [bx,by,r] of blobs) ctx.moveTo(bx+dx+r*rk,by+dy), ctx.arc(bx+dx,by+dy,r*rk,0,6.283); ctx.fill(); };
+      // 그림자
+      ctx.fillStyle='rgba(0,0,0,0.18)'; draw(6,10,1);
+      // 본체 (테마색 살짝 반영)
+      const dark = th.id==='night'?'#6f7f9f' : th.id==='volcano'?'#8a6a6a' : '#b9c9d9';
+      const light= th.id==='night'?'#aab6cc' : th.id==='volcano'?'#d8b8a8' : '#ffffff';
+      ctx.fillStyle='rgba(60,80,110,0.6)'; draw(0,0,1.07);   // 외곽 테두리 역할
+      ctx.fillStyle=dark; draw(0,4,1.0);
+      ctx.fillStyle=light; draw(0,-2,0.96);
+      ctx.restore();
+    }
   },
 
   // 지면에 붙은 테마 소품
@@ -1014,8 +1083,8 @@ const Render = {
   effects(){
     const fx=Game.fx;
     for(const s of fx.smokes){
-      ctx.save(); ctx.globalAlpha=0.35*(1-s.t/s.life);
-      ctx.fillStyle='#9a9a9a';
+      ctx.save(); ctx.globalAlpha=(s.white?0.7:0.35)*(1-s.t/s.life);
+      ctx.fillStyle=s.white?'#ffffff':'#9a9a9a';
       ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,6.283); ctx.fill(); ctx.restore();
     }
     for(const p of fx.parts){

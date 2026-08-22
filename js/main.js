@@ -10,30 +10,41 @@ const WORLD_W = 1700;          // 월드 폭 (px)
 const WORLD_H = 960;           // 월드 높이
 const WATER_Y = WORLD_H - 46;  // 수면 y
 const GRAVITY = 300;           // px/s^2
-const WIND_ACCEL = 2.4;        // 바람 1당 가속도
-const POWER_TO_SPEED = 7.6;    // 파워(0~100) → 초기 속도
+const WIND_ACCEL = 2.0;        // 바람 1당 가속도
+const MAX_SPEED = 650;         // 파워 100일 때 초기 속도 (45도 무풍 사거리 ≈ 1410px, 맵 끝까지)
+// 사거리는 속도²에 비례하므로, 속도를 √파워에 비례시켜 사거리가 파워에 정비례하게 한다
+const speedFor = (power, w) => MAX_SPEED * Math.sqrt(clamp(power,8,100)/100) * w.speedMul;
 const TURN_TIME = 30;          // 턴 제한(초)
 const TANK_R = 16;             // 탱크 피격 반경
 
 // ---------------- 탱크 타입 ----------------
 const TANK_TYPES = [
   {
-    id:'canny', name:'캐니', desc:'균형 잡힌 표준 캐논.\n일반탄이 든든하다.',
+    id:'canny', name:'캐니', desc:'균형 잡힌 표준 캐논.\n포격 계열 무기 체계.',
     hp:100, fuel:110, bodyColor:['#4aa3e8','#e85b4a'],
-    normal:{ label:'캐논탄', dmg:26, radius:42, speedMul:1.0, gravMul:1.0, count:1, spread:0 },
-    special:{ label:'더블샷', dmg:17, radius:30, speedMul:1.0, gravMul:1.0, count:2, spread:4, ammo:2 },
+    weapons:[
+      { label:'캐논탄', icon:'●', dmg:26, radius:42, speedMul:1.0, gravMul:1.0, count:1, spread:0 },
+      { label:'더블샷', icon:'●●', dmg:17, radius:30, speedMul:1.0, gravMul:1.0, count:2, spread:4, ammo:3 },
+      { label:'철갑탄', icon:'◆', dmg:38, radius:28, speedMul:1.05, gravMul:1.1, count:1, spread:0, ammo:2 },
+    ],
   },
   {
-    id:'missos', name:'미소스', desc:'빠르고 곧게 나는 로켓.\n특수탄은 3연발!',
+    id:'missos', name:'미소스', desc:'빠르고 곧게 나는 로켓.\n미사일 계열 무기 체계.',
     hp:90, fuel:130, bodyColor:['#39b8a0','#e88f3a'],
-    normal:{ label:'로켓탄', dmg:29, radius:32, speedMul:1.22, gravMul:0.88, count:1, spread:0 },
-    special:{ label:'트리플', dmg:12, radius:24, speedMul:1.22, gravMul:0.88, count:3, spread:5, ammo:2 },
+    weapons:[
+      { label:'로켓탄', icon:'➤', dmg:29, radius:32, speedMul:0.95, gravMul:0.88, count:1, spread:0 },
+      { label:'트리플', icon:'➤➤➤', dmg:12, radius:24, speedMul:0.95, gravMul:0.88, count:3, spread:5, ammo:3 },
+      { label:'유도탄', icon:'◎', dmg:24, radius:30, speedMul:0.9, gravMul:0.8, count:1, spread:0, ammo:2, homing:2.6 },
+    ],
   },
   {
-    id:'boomba', name:'붐바', desc:'느리지만 강력한 중전차.\n메가봄은 지형을 크게 판다.',
+    id:'boomba', name:'붐바', desc:'느리지만 강력한 중전차.\n폭탄 계열 무기 체계.',
     hp:115, fuel:85, bodyColor:['#7d6ae0','#d64a7d'],
-    normal:{ label:'헤비탄', dmg:31, radius:50, speedMul:0.9, gravMul:1.05, count:1, spread:0 },
-    special:{ label:'메가봄', dmg:44, radius:66, speedMul:0.82, gravMul:1.1, count:1, spread:0, ammo:2 },
+    weapons:[
+      { label:'헤비탄', icon:'⬤', dmg:31, radius:50, speedMul:1.0, gravMul:1.05, count:1, spread:0 },
+      { label:'메가봄', icon:'✸', dmg:44, radius:66, speedMul:1.0, gravMul:1.08, count:1, spread:0, ammo:2 },
+      { label:'클러스터', icon:'✦', dmg:14, radius:26, speedMul:1.0, gravMul:1.05, count:1, spread:0, ammo:2, cluster:5 },
+    ],
   },
 ];
 
@@ -116,15 +127,27 @@ class Tank {
     this.facing = teamIdx===0 ? 1 : -1;
     this.angle = 45;                 // 포신 각도(지면 기준 0~85)
     this.fuel = this.type.fuel;
-    this.specialAmmo = this.type.special.ammo;
-    this.useSpecial = false;
+    this.weaponIdx = 0;
+    this.ammo = this.type.weapons.map(w => w.ammo===undefined ? Infinity : w.ammo);
     this.alive = true;
     this.tilt = 0;
     this.hitFlash = 0;
     this.recoil = 0;
   }
   get color(){ return this.type.bodyColor[this.team]; }
-  weapon(){ return this.useSpecial && this.specialAmmo>0 ? this.type.special : this.type.normal; }
+  weapon(){ return this.type.weapons[this.weaponIdx]; }
+  // 다음 무기로 순환 (탄약 없는 무기는 건너뜀)
+  nextWeapon(){
+    const n=this.type.weapons.length;
+    for(let k=1;k<=n;k++){
+      const i=(this.weaponIdx+k)%n;
+      if(this.ammo[i]>0){ this.weaponIdx=i; return; }
+    }
+  }
+  consumeAmmo(){
+    this.ammo[this.weaponIdx]--;
+    if(this.ammo[this.weaponIdx]<=0) this.weaponIdx=0;
+  }
   muzzle(angDeg){
     const a = this.barrelWorldAngle(angDeg);
     // 포신 피벗(차체 위 0,-10)을 차체 기울기만큼 회전시킨 실제 위치
@@ -180,17 +203,34 @@ class Tank {
 
 // ---------------- 발사체 ----------------
 class Projectile {
-  constructor(x,y,vx,vy,weapon,owner){
+  constructor(x,y,vx,vy,weapon,owner,isChild){
     this.x=x; this.y=y; this.vx=vx; this.vy=vy;
-    this.weapon=weapon; this.owner=owner;
+    this.weapon=weapon; this.owner=owner; this.isChild=!!isChild;
     this.dead=false; this.trail=[]; this.age=0;
   }
   step(dt, game){
     this.age+=dt;
     const sub=4, h=dt/sub;
+    // 유도탄: 발사 0.35초 후부터 가장 가까운 적을 향해 완만하게 선회
+    let tgt=null;
+    if(this.weapon.homing && this.age>0.35){
+      let bd=1e9;
+      for(const t of game.tanks){ if(!t.alive||t===this.owner) continue;
+        const d=Math.hypot(t.x-this.x, t.y-this.y); if(d<bd){ bd=d; tgt=t; } }
+    }
     for(let i=0;i<sub && !this.dead;i++){
-      this.vx += game.wind*WIND_ACCEL*h;
-      this.vy += GRAVITY*this.weapon.gravMul*h;
+      if(!tgt){
+        this.vx += game.wind*WIND_ACCEL*h;
+        this.vy += GRAVITY*this.weapon.gravMul*h;
+      } else {
+        // 락온 후 추진 비행: 중력/바람 무시
+        // 속도 크기는 유지하고 진행 방향만 목표 쪽으로 제한 각속도(rad/s)로 선회
+        const sp=Math.hypot(this.vx,this.vy);
+        const want=Math.atan2((tgt.y-8)-this.y, tgt.x-this.x), cur=Math.atan2(this.vy,this.vx);
+        let diff=want-cur; diff=Math.atan2(Math.sin(diff),Math.cos(diff));
+        const na=cur+clamp(diff, -this.weapon.homing*h, this.weapon.homing*h);
+        this.vx=Math.cos(na)*sp; this.vy=Math.sin(na)*sp;
+      }
       this.x += this.vx*h; this.y += this.vy*h;
       // 월드 밖
       if(this.x<-250 || this.x>WORLD_W+250 || this.y>WORLD_H+60){ this.dead=true; return; }
@@ -211,7 +251,18 @@ class Projectile {
     this.trail.push({x:this.x, y:this.y, t:0.5});
     if(this.trail.length>26) this.trail.shift();
   }
-  explode(game){ this.dead=true; game.explosionAt(this.x, this.y, this.weapon, this.owner); }
+  explode(game){
+    this.dead=true;
+    game.explosionAt(this.x, this.y, this.weapon, this.owner);
+    // 클러스터: 착탄 시 소형 자탄을 위로 흩뿌린다
+    if(this.weapon.cluster && !this.isChild){
+      const child={ label:'자탄', dmg:11, radius:22, speedMul:1, gravMul:1.05, count:1, spread:0 };
+      for(let i=0;i<this.weapon.cluster;i++){
+        const a=-Math.PI/2 + rand(-0.75,0.75), sp=rand(180,300);
+        game.projectiles.push(new Projectile(this.x, this.y-6, Math.cos(a)*sp, Math.sin(a)*sp, child, this.owner, true));
+      }
+    }
+  }
 }
 
 // ---------------- 파티클/이펙트 ----------------
@@ -335,9 +386,8 @@ const Game = {
 
   fire(){
     const t=this.cur(), w=t.weapon();
-    if(t.useSpecial && t.specialAmmo>0) t.specialAmmo--;
-    if(t.specialAmmo<=0) t.useSpecial=false;
-    const speed = Math.max(12, this.power)*POWER_TO_SPEED*w.speedMul;
+    t.consumeAmmo();
+    const speed = speedFor(this.power, w);
     const a = t.barrelWorldAngle();
     const m = t.muzzle();
     for(let i=0;i<w.count;i++){
@@ -401,7 +451,7 @@ const Game = {
   // ---------- AI ----------
   simulateShot(from, angleDeg, power, w){
     const a = from.barrelWorldAngle(angleDeg);
-    const speed=power*POWER_TO_SPEED*w.speedMul;
+    const speed=speedFor(power, w);
     const m = from.muzzle(angleDeg);
     let x=m.x, y=m.y;
     let vx=Math.cos(a)*speed, vy=Math.sin(a)*speed;
@@ -418,8 +468,12 @@ const Game = {
   aiDecide(){
     const me=this.cur(), foe=this.foe();
     me.facing = foe.x>me.x?1:-1;
-    // 특수탄: 상대 HP 40 이하 또는 남은 탄 있고 30% 확률
-    me.useSpecial = me.specialAmmo>0 && (foe.hp<=40 || Math.random()<0.3);
+    // 무기 선택: 기본은 1번, 탄약이 남은 특수 무기를 상대 HP 45 이하이거나 35% 확률로 사용
+    me.weaponIdx=0;
+    const specials=me.type.weapons.map((w,i)=>i).filter(i=>i>0 && me.ammo[i]>0);
+    if(specials.length && (foe.hp<=45 || Math.random()<0.35)){
+      me.weaponIdx=specials[Math.floor(Math.random()*specials.length)];
+    }
     const w=me.weapon();
     let best=null;
     for(let ang=15; ang<=80; ang+=4){
@@ -710,12 +764,21 @@ const Render = {
     // 조준 가이드 (사람 차례, 조준 중)
     if(Game.state==='play' && Game.cur()===t && !t.isAI && (Game.phase==='aim'||Game.phase==='charging')){
       const a=t.barrelWorldAngle(), m=t.muzzle();
+      const ex=m.x+Math.cos(a)*120, ey=m.y+Math.sin(a)*120;
       ctx.save();
-      ctx.setLineDash([3,7]);
-      ctx.strokeStyle='rgba(255,255,255,0.75)'; ctx.lineWidth=2;
-      ctx.beginPath(); ctx.moveTo(m.x,m.y);
-      ctx.lineTo(m.x+Math.cos(a)*110, m.y+Math.sin(a)*110);
-      ctx.stroke();
+      ctx.lineCap='round';
+      // 어두운 외곽선 + 밝은 주황 점선
+      ctx.setLineDash([8,6]);
+      ctx.strokeStyle='rgba(40,20,0,0.8)'; ctx.lineWidth=5;
+      ctx.beginPath(); ctx.moveTo(m.x,m.y); ctx.lineTo(ex,ey); ctx.stroke();
+      ctx.strokeStyle='#ffb020'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.moveTo(m.x,m.y); ctx.lineTo(ex,ey); ctx.stroke();
+      // 끝점 화살촉
+      ctx.setLineDash([]);
+      ctx.fillStyle='#ffb020'; ctx.strokeStyle='rgba(40,20,0,0.8)'; ctx.lineWidth=1.5;
+      ctx.translate(ex,ey); ctx.rotate(a);
+      ctx.beginPath(); ctx.moveTo(8,0); ctx.lineTo(-4,-6); ctx.lineTo(-4,6); ctx.closePath();
+      ctx.fill(); ctx.stroke();
       ctx.restore();
     }
   },
@@ -735,10 +798,23 @@ const Render = {
       ctx.save();
       ctx.translate(p.x,p.y);
       ctx.rotate(Math.atan2(p.vy,p.vx));
-      ctx.fillStyle='#2f2f38';
-      ctx.beginPath(); ctx.ellipse(0,0,7,4.5,0,0,6.283); ctx.fill();
-      ctx.fillStyle='#ff8833';
-      ctx.beginPath(); ctx.ellipse(-6,0,4,2.6,0,0,6.283); ctx.fill();
+      const w=p.weapon, sc=p.isChild?0.6:(w.radius>=60?1.35:1);
+      ctx.scale(sc,sc);
+      if(w.homing){
+        // 유도탄: 붉은 탄두 + 긴 화염
+        ctx.fillStyle='#ff4a3a'; ctx.beginPath(); ctx.ellipse(0,0,8,3.8,0,0,6.283); ctx.fill();
+        ctx.fillStyle='#ffe08a'; ctx.beginPath(); ctx.ellipse(-9,0,6,2.4,0,0,6.283); ctx.fill();
+        ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(4,0,1.6,0,6.283); ctx.fill();
+      } else if(w.cluster){
+        // 클러스터: 둥근 폭탄 + 노란 띠
+        ctx.fillStyle='#3a3a48'; ctx.beginPath(); ctx.arc(0,0,6.5,0,6.283); ctx.fill();
+        ctx.strokeStyle='#ffd23e'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(0,0,4,0,6.283); ctx.stroke();
+      } else {
+        ctx.fillStyle='#2f2f38';
+        ctx.beginPath(); ctx.ellipse(0,0,7,4.5,0,0,6.283); ctx.fill();
+        ctx.fillStyle='#ff8833';
+        ctx.beginPath(); ctx.ellipse(-6,0,4,2.6,0,0,6.283); ctx.fill();
+      }
       ctx.restore();
     }
     // 직전 착탄 지점 마커
@@ -1033,7 +1109,7 @@ const UI = {
     this.els.btnWeapon.addEventListener('click', ()=>{
       const t=Game.cur();
       if(Game.state!=='play' || t.isAI || Game.phase!=='aim') return;
-      if(t.specialAmmo>0){ t.useSpecial=!t.useSpecial; Sound.click(); this.refresh(); }
+      t.nextWeapon(); Sound.click(); this.refresh();
     });
 
     // 발사(홀드 차지)
@@ -1104,7 +1180,7 @@ const UI = {
       card.appendChild(cv);
       const n=document.createElement('div'); n.className='tname'; n.textContent=tt.name; card.appendChild(n);
       const d=document.createElement('div'); d.className='tdesc';
-      d.textContent=`${tt.desc.replace('\n',' ')} (HP ${tt.hp} · 특수 ${tt.special.label}×${tt.special.ammo})`;
+      d.textContent=`${tt.desc.replace('\n',' ')} HP ${tt.hp} · `+tt.weapons.map(w=>w.label+(w.ammo?`×${w.ammo}`:'')).join(' / ');
       card.appendChild(d);
       this.drawCardTank(cv, tt.bodyColor[team], tt.id);
       card.addEventListener('click', ()=>{
@@ -1153,7 +1229,8 @@ const UI = {
     // 무기
     const cur=Game.cur();
     const wp=cur.weapon();
-    this.els.btnWeapon.textContent = cur.useSpecial&&cur.specialAmmo>0 ? `★${wp.label}(${cur.specialAmmo})` : wp.label;
+    const am=cur.ammo[cur.weaponIdx];
+    this.els.btnWeapon.textContent = `${wp.icon} ${wp.label}${am===Infinity?'':` (${am})`}`;
     // 컨트롤 표시/숨김 (AI 턴엔 비활성 느낌)
     this.els.controls.classList.toggle('ai-dim', cur.isAI);
     this.els.controls.style.pointerEvents = cur.isAI?'none':'auto';

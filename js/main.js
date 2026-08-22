@@ -287,6 +287,16 @@ class Projectile {
         }
       }
       if(!game.obstacles.some(o=>inCloud(o,this.x,this.y))) this.inCloudNow=false;
+      // 새와 충돌: 새는 추락, 탄은 속도 절반
+      for(const b of game.birds){
+        if(b.hit) continue;
+        const bdx=this.x-b.x, bdy=this.y-b.y;
+        if(bdx*bdx+bdy*bdy < 13*13){
+          b.hit=true; b.vy=-60; this.vx*=0.5; this.vy*=0.5;
+          game.fx.feathers(b.x,b.y, game.theme.id==='night'?'#3a3a50':(game.theme.id==='snow'?'#ffffff':'#d8c8b0'));
+          game.fx.pop(b.x,b.y-14,'새!','#fff');
+        }
+      }
       this.x += this.vx*h; this.y += this.vy*h;
       // 월드 밖
       if(this.x<-250 || this.x>WORLD_W+250 || this.y>WORLD_H+60){ this.dead=true; return; }
@@ -325,6 +335,12 @@ class Projectile {
 class FX {
   constructor(){ this.parts=[]; this.pops=[]; this.rings=[]; this.smokes=[]; this.flashes=[]; }
   flash(x,y,a){ this.flashes.push({x,y,a,t:0}); }
+  feathers(x,y,c){
+    for(let i=0;i<10;i++){
+      const a=rand(0,6.283), sp=rand(30,110);
+      this.parts.push({x,y,vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-40, life:rand(0.6,1.1), t:0, size:rand(2,4), c});
+    }
+  }
   puff(x,y){ for(let i=0;i<6;i++) this.smokes.push({x:x+rand(-8,8),y:y+rand(-6,6),r:rand(4,8),t:0,life:rand(0.4,0.7),white:true}); }
   burst(x,y,r,colors){
     for(let i=0;i<Math.min(46, r*0.9);i++){
@@ -373,6 +389,7 @@ const Game = {
   camTarget:null,
   clouds:[], time:0,
   theme:THEMES.grass, props:[], ambient:[], obstacles:[],
+  birds:[], birdRate:1, birdTimer:6,
   selP1:0, selP2:0, selStep:0,
   aiTimer:0, aiPlan:null, aiShots:0,
   banner:{text:'', t:99},
@@ -389,6 +406,9 @@ const Game = {
     let pat = opts.clouds;
     if(pat===undefined) pat = Math.random()<0.5 ? 'none' : CLOUD_PATTERN_LIST[Math.floor(Math.random()*CLOUD_PATTERN_LIST.length)];
     this.obstacles = (CLOUD_PATTERNS[pat]||CLOUD_PATTERNS.none)(opts.cloudK||1).map(c=>Object.assign({wobble:0, pat}, c));
+    // 새: 0 없음 / 1 가끔 / 2 자주
+    this.birds=[]; this.birdRate = opts.birds===undefined ? 1 : opts.birds;
+    this.birdTimer = this.birdRate ? rand(4,9) : 1e9;
     this.aiShots = 0; this.turnCount = 0;
     const x1 = rand(140, 320), x2 = rand(WORLD_W-320, WORLD_W-140);
     const t1 = new Tank(this.selP1, 0, x1, 'P1 · '+TANK_TYPES[this.selP1].name, false);
@@ -432,6 +452,28 @@ const Game = {
     else if(k==='sand'){ p.vy=rand(-0.01,0.01); p.vx=rand(0.35,0.7); p.x=anywhere?Math.random():-0.05; p.y=rand(0.3,0.95); }
     else { p.vy=rand(-0.01,0.01); p.vx=rand(-0.02,0.02); p.y=rand(0.3,0.9); }   // 반딧불
     return p;
+  },
+  // ---------- 새 ----------
+  spawnFlock(){
+    const dir = Math.random()<0.5 ? 1 : -1;
+    const n = 3 + Math.floor(Math.random()*3);
+    const y = WORLD_H*rand(0.14,0.42), sp = rand(70,115)*dir;
+    const x0 = dir===1 ? -60 : WORLD_W+60;
+    for(let i=0;i<n;i++){
+      this.birds.push({ x:x0 - dir*i*26, y:y + Math.abs(i-(n-1)/2)*12, vx:sp, vy:0, ph:rand(0,6.28), hit:false, rot:0 });
+    }
+  },
+  updateBirds(dt){
+    if(this.birdRate){
+      this.birdTimer-=dt;
+      if(this.birdTimer<=0){ this.spawnFlock(); this.birdTimer = this.birdRate>=2 ? rand(5,10) : rand(10,20); }
+    }
+    for(const b of this.birds){
+      b.ph+=dt*9;
+      if(b.hit){ b.vy+=GRAVITY*0.9*dt; b.rot+=dt*7; b.x+=b.vx*0.3*dt; b.y+=b.vy*dt; }
+      else { b.x+=b.vx*dt; b.y+=Math.sin(b.ph*0.4)*6*dt; }
+    }
+    this.birds=this.birds.filter(b=> b.x>-120 && b.x<WORLD_W+120 && b.y<WATER_Y+10 && !(b.hit && b.y>=this.terrain.heightAt(b.x)));
   },
   updateAmbient(dt){
     const k=this.theme.particles; if(!k) return;
@@ -610,6 +652,7 @@ const Game = {
 
     this.fx.update(dt);
     this.updateAmbient(dt);
+    this.updateBirds(dt);
     if(this.lastImpact) this.lastImpact.t+=dt;
     if(this.banner.t<3) this.banner.t+=dt;
 
@@ -717,6 +760,7 @@ const Render = {
     this.mountains();
     this.terrain();
     this.props();
+    this.birds();
     for(const t of Game.tanks) this.tank(t);
     this.projectiles();
     this.obstacleClouds();
@@ -840,6 +884,34 @@ const Render = {
       }
     }
     ctx.restore();
+  },
+
+  birds(){
+    const th=Game.theme;
+    const bat = th.id==='night';
+    const col = bat?'#2a2a3e' : th.id==='snow'?'#f4f8ff' : th.id==='volcano'?'#3a2a2a' : '#4a3a30';
+    for(const b of Game.birds){
+      ctx.save();
+      ctx.translate(b.x,b.y);
+      if(b.vx<0) ctx.scale(-1,1);
+      ctx.rotate(b.rot);
+      const flap = b.hit ? 0.2 : Math.sin(b.ph);
+      ctx.fillStyle=col; ctx.strokeStyle=col; ctx.lineWidth=2.2; ctx.lineCap='round';
+      // 몸통
+      ctx.beginPath(); ctx.ellipse(0,0,7,3.2,0,0,6.283); ctx.fill();
+      // 머리/부리
+      ctx.beginPath(); ctx.arc(7,-1,2.6,0,6.283); ctx.fill();
+      ctx.fillStyle=bat?col:'#ffb347'; ctx.beginPath(); ctx.moveTo(9.5,-1); ctx.lineTo(13,0); ctx.lineTo(9.5,1); ctx.closePath(); ctx.fill();
+      // 날개 (펄럭임)
+      ctx.strokeStyle=col; ctx.lineWidth= bat?3:2.4;
+      ctx.beginPath(); ctx.moveTo(-1,0); ctx.quadraticCurveTo(-6,-10*flap-2, -14,-9*flap); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-1,0); ctx.quadraticCurveTo(6,-10*flap-2, 13,-8*flap); ctx.stroke();
+      if(bat){ // 박쥐 날개막
+        ctx.globalAlpha=0.85; ctx.beginPath(); ctx.moveTo(-1,0); ctx.quadraticCurveTo(-6,-10*flap-2,-14,-9*flap); ctx.lineTo(-9,-2*flap+2); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(-1,0); ctx.quadraticCurveTo(6,-10*flap-2,13,-8*flap); ctx.lineTo(8,-2*flap+2); ctx.closePath(); ctx.fill();
+      }
+      ctx.restore();
+    }
   },
 
   // 장애물 구름 (배경 구름과 구분: 진하고 외곽선+그림자, 맞으면 출렁임)

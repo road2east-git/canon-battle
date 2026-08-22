@@ -49,6 +49,31 @@ const TANK_TYPES = [
   },
 ];
 
+// ---------------- 테마 ----------------
+const THEMES = {
+  grass:  { id:'grass', name:'초원', sky:['#6fc1f2','#b8e4fb','#e6f7ff'], sun:'#ffe158', cloudColor:'#ffffff', cloudAlpha:0.85,
+            mountain:'#8fb8d9', mountainAlpha:0.45, dirt:['#b5793c','#8e5a28','#6d411a'], grain:'rgba(60,35,10,0.25)',
+            rim:['#4fae3d','#7ed957'], water:['#48a7e8','#1e5f9e'], waterLine:'#bfe7ff', sinkText:'풍덩!', sinkColor:'#7fd4ff',
+            props:'trees', particles:null },
+  desert: { id:'desert', name:'사막', sky:['#f2934a','#fbcf86','#fff1cc'], sun:'#fff4b0', cloudColor:'#fff6e6', cloudAlpha:0.5,
+            mountain:'#d9985c', mountainAlpha:0.5, dirt:['#eac878','#cfa052','#a3763a'], grain:'rgba(120,80,20,0.25)',
+            rim:['#f4d88e','#fbe9b8'], water:['#e2bb6c','#b08538'], waterLine:'#f8e2a6', sinkText:'푹!', sinkColor:'#f3d48a',
+            props:'cactus', particles:'sand' },
+  snow:   { id:'snow', name:'설원', sky:['#9ccdf0','#d8ecfa','#ffffff'], sun:'#fff8d8', cloudColor:'#ffffff', cloudAlpha:0.9,
+            mountain:'#b7d2e8', mountainAlpha:0.6, dirt:['#9a7a5a','#6e5440','#4e3a2c'], grain:'rgba(40,25,15,0.3)',
+            rim:['#e6f2ff','#ffffff'], water:['#7fc6ea','#2f7fb0'], waterLine:'#e6f6ff', sinkText:'풍덩!', sinkColor:'#bfe7ff',
+            props:'pines', particles:'snow' },
+  volcano:{ id:'volcano', name:'화산', sky:['#2c0f22','#8a2a2a','#ec7a3c'], sun:'#ff8040', cloudColor:'#6a4a50', cloudAlpha:0.55,
+            mountain:'#3a2230', mountainAlpha:0.75, dirt:['#4e3e3e','#2f2525','#1a1414'], grain:'rgba(255,130,40,0.2)',
+            rim:['#5e4c4a','#7c6462'], water:['#ff8c2a','#c63c0a'], waterLine:'#ffe38a', sinkText:'치이익!', sinkColor:'#ffb347',
+            props:'volcano', particles:'ash', lava:true },
+  night:  { id:'night', name:'밤하늘', sky:['#070c24','#1a2a58','#3b4c86'], sun:null, moon:'#fff6cc', stars:true, cloudColor:'#7484aa', cloudAlpha:0.45,
+            mountain:'#0f172e', mountainAlpha:0.85, dirt:['#5c4c3c','#3a2e22','#221a12'], grain:'rgba(0,0,0,0.3)',
+            rim:['#2d6b3a','#3f8c4c'], water:['#17305c','#0a1a36'], waterLine:'#6f93d6', sinkText:'풍덩!', sinkColor:'#8fb3ff',
+            props:'city', particles:'fireflies' },
+};
+const THEME_LIST = Object.keys(THEMES);
+
 // ---------------- 유틸 ----------------
 const clamp = (v,a,b)=> v<a?a : v>b?b : v;
 const lerp = (a,b,t)=> a+(b-a)*t;
@@ -316,15 +341,19 @@ const Game = {
   cam:{x:WORLD_W/2, y:WORLD_H/2, zoom:1, shake:0},
   camTarget:null,
   clouds:[], time:0,
+  theme:THEMES.grass, props:[], ambient:[],
   selP1:0, selP2:0, selStep:0,
   aiTimer:0, aiPlan:null, aiShots:0,
   banner:{text:'', t:99},
   lastImpact:null,
   turnSwitchDelay:0,
 
-  newMatch(){
+  newMatch(opts){
+    opts = opts || {};
+    this.theme = THEMES[opts.theme] || THEMES[THEME_LIST[Math.floor(Math.random()*THEME_LIST.length)]];
     this.terrain = new Terrain();
     this.projectiles=[]; this.fx=new FX();
+    this.initAmbient();
     this.aiShots = 0; this.turnCount = 0;
     const x1 = rand(140, 320), x2 = rand(WORLD_W-320, WORLD_W-140);
     const t1 = new Tank(this.selP1, 0, x1, 'P1 · '+TANK_TYPES[this.selP1].name, false);
@@ -333,6 +362,7 @@ const Game = {
     t1.y = this.terrain.heightAt(t1.x)-6;
     t2.y = this.terrain.heightAt(t2.x)-6;
     this.tanks=[t1,t2];
+    this.initProps();
     this.current = Math.floor(Math.random()*2);
     this.wind = Math.round(rand(-6,6));   // 첫 턴은 약한 바람으로 시작
     this.state='play';
@@ -342,6 +372,42 @@ const Game = {
   },
 
   cur(){ return this.tanks[this.current]; },
+
+  // 테마 소품 위치 (탱크 스폰 지역 회피)
+  initProps(){
+    this.props=[];
+    const n = 7;
+    for(let i=0;i<n;i++){
+      const x = 120 + (i+0.5)*(WORLD_W-240)/n + rand(-50,50);
+      if(this.tanks.some && this.tanks.some(t=>Math.abs(t.x-x)<70)) continue;
+      this.props.push({x, seed:hash(i*13.7+this.theme.id.length), kind:this.theme.props});
+    }
+  },
+  // 대기 파티클 (화면 정규화 좌표 0~1)
+  initAmbient(){
+    this.ambient=[];
+    const k=this.theme.particles; if(!k) return;
+    const n = k==='snow'?90 : k==='ash'?55 : k==='sand'?45 : 28;
+    for(let i=0;i<n;i++) this.ambient.push(this.spawnAmbient(k, true));
+  },
+  spawnAmbient(k, anywhere){
+    const p={x:Math.random(), y:anywhere?Math.random():-0.02, s:rand(0.6,1.4), ph:rand(0,6.28)};
+    if(k==='snow'){ p.vy=rand(0.05,0.1); p.vx=rand(-0.02,0.02); }
+    else if(k==='ash'){ p.vy=rand(0.03,0.07); p.vx=rand(-0.03,0.01); p.y=anywhere?Math.random():-0.02; }
+    else if(k==='sand'){ p.vy=rand(-0.01,0.01); p.vx=rand(0.35,0.7); p.x=anywhere?Math.random():-0.05; p.y=rand(0.3,0.95); }
+    else { p.vy=rand(-0.01,0.01); p.vx=rand(-0.02,0.02); p.y=rand(0.3,0.9); }   // 반딧불
+    return p;
+  },
+  updateAmbient(dt){
+    const k=this.theme.particles; if(!k) return;
+    const wdir = this.wind/WIND_MAX;
+    for(let i=0;i<this.ambient.length;i++){
+      const p=this.ambient[i]; p.ph+=dt;
+      p.x += (p.vx + (k==='snow'||k==='ash' ? wdir*0.03 : 0))*dt;
+      p.y += p.vy*dt + (k==='snow'?Math.sin(p.ph*1.5)*0.004*dt:0);
+      if(p.y>1.05 || p.x>1.1 || p.x<-0.1){ this.ambient[i]=this.spawnAmbient(k,false); }
+    }
+  },
   foe(){ return this.tanks[1-this.current]; },
 
   startTurn(first){
@@ -443,7 +509,7 @@ const Game = {
     t.alive=false; t.hp=0;
     this.fx.splash(t.x);
     Sound.splash();
-    this.fx.pop(t.x, WATER_Y-30, '풍덩!', '#7fd4ff');
+    this.fx.pop(t.x, WATER_Y-30, this.theme.sinkText, this.theme.sinkColor);
     UI.refresh();
   },
 
@@ -503,6 +569,7 @@ const Game = {
     if(this.state!=='play'){ return; }
 
     this.fx.update(dt);
+    this.updateAmbient(dt);
     if(this.lastImpact) this.lastImpact.t+=dt;
     if(this.banner.t<3) this.banner.t+=dt;
 
@@ -609,12 +676,14 @@ const Render = {
 
     this.mountains();
     this.terrain();
+    this.props();
     for(const t of Game.tanks) this.tank(t);
     this.projectiles();
     this.effects();
     this.water();
     this.powerGauge();
     ctx.restore();
+    this.ambient(vw,vh);
     this.countdown(vw,vh);
   },
 
@@ -640,23 +709,42 @@ const Render = {
   },
 
   sky(vw,vh){
+    const th=Game.theme;
     const g=ctx.createLinearGradient(0,0,0,vh);
-    g.addColorStop(0,'#6fc1f2'); g.addColorStop(0.55,'#b8e4fb'); g.addColorStop(1,'#e6f7ff');
+    g.addColorStop(0,th.sky[0]); g.addColorStop(0.55,th.sky[1]); g.addColorStop(1,th.sky[2]);
     ctx.fillStyle=g; ctx.fillRect(0,0,vw,vh);
-    // 해
-    ctx.save();
-    ctx.globalAlpha=0.9;
+    // 별
+    if(th.stars){
+      ctx.save(); ctx.fillStyle='#fff';
+      for(let i=0;i<90;i++){
+        const x=hash(i*1.3)*vw, y=hash(i*2.7)*vh*0.6, r=0.6+hash(i*5.1)*1.6;
+        ctx.globalAlpha=0.4+0.6*Math.abs(Math.sin(Game.time*1.5+i));
+        ctx.beginPath(); ctx.arc(x,y,r,0,6.283); ctx.fill();
+      }
+      ctx.restore();
+    }
+    // 해 / 달
     const sunX=vw*0.82, sunY=vh*0.16;
-    const rg=ctx.createRadialGradient(sunX,sunY,4,sunX,sunY,60);
-    rg.addColorStop(0,'#fff7ae'); rg.addColorStop(0.5,'#ffe158'); rg.addColorStop(1,'rgba(255,225,88,0)');
-    ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(sunX,sunY,60,0,6.283); ctx.fill();
+    ctx.save();
+    if(th.sun){
+      ctx.globalAlpha=0.9;
+      const rg=ctx.createRadialGradient(sunX,sunY,4,sunX,sunY,60);
+      rg.addColorStop(0,'#fff9c8'); rg.addColorStop(0.5,th.sun); rg.addColorStop(1,'rgba(255,225,88,0)');
+      ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(sunX,sunY,60,0,6.283); ctx.fill();
+    } else if(th.moon){
+      const rg=ctx.createRadialGradient(sunX,sunY,10,sunX,sunY,70);
+      rg.addColorStop(0,'rgba(255,246,204,0.35)'); rg.addColorStop(1,'rgba(255,246,204,0)');
+      ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(sunX,sunY,70,0,6.283); ctx.fill();
+      ctx.fillStyle=th.moon; ctx.beginPath(); ctx.arc(sunX,sunY,26,0,6.283); ctx.fill();
+      ctx.fillStyle=th.sky[0]; ctx.globalAlpha=0.9; ctx.beginPath(); ctx.arc(sunX+11,sunY-6,22,0,6.283); ctx.fill();
+    }
     ctx.restore();
     // 구름 (화면 좌표 고정 비율)
     ctx.save();
     for(const c of Game.clouds){
       const x=(c.x/WORLD_W)*vw, y=c.y*vh;
-      ctx.globalAlpha=0.85;
-      ctx.fillStyle='#ffffff';
+      ctx.globalAlpha=th.cloudAlpha;
+      ctx.fillStyle=th.cloudColor;
       const s=c.s*(vh/500);
       ctx.beginPath();
       ctx.arc(x,y,18*s,0,6.283); ctx.arc(x+20*s,y-8*s,15*s,0,6.283);
@@ -667,28 +755,116 @@ const Render = {
   },
 
   mountains(){
+    const th=Game.theme;
     ctx.save();
-    ctx.globalAlpha=0.45;
-    ctx.fillStyle='#8fb8d9';
-    ctx.beginPath(); ctx.moveTo(0,WORLD_H*0.55);
-    for(let x=0;x<=WORLD_W;x+=60){
-      ctx.lineTo(x, WORLD_H*0.42 + Math.sin(x*0.008+2)*60 + Math.sin(x*0.02)*24);
+    ctx.globalAlpha=th.mountainAlpha;
+    ctx.fillStyle=th.mountain;
+    if(th.props==='city'){
+      // 도시 스카이라인
+      for(let i=0;i<26;i++){
+        const w=40+hash(i*3.1)*50, x=i*(WORLD_W/26), h=80+hash(i*7.7)*220, y=WORLD_H*0.62-h;
+        ctx.fillRect(x,y,w,h+WORLD_H);
+      }
+      ctx.globalAlpha=0.9; ctx.fillStyle='#ffe38a';
+      for(let i=0;i<26;i++){
+        const w=40+hash(i*3.1)*50, x=i*(WORLD_W/26), h=80+hash(i*7.7)*220, y=WORLD_H*0.62-h;
+        for(let r=0;r<h-14;r+=16) for(let c=6;c<w-8;c+=12){
+          if(hash(i*91+r*3+c*7)<0.35) ctx.fillRect(x+c,y+r+6,5,7);
+        }
+      }
+    } else if(th.props==='volcano'){
+      // 큰 화산 실루엣 + 분화구 발광
+      ctx.beginPath(); ctx.moveTo(0,WORLD_H*0.62);
+      ctx.lineTo(WORLD_W*0.35,WORLD_H*0.62); ctx.lineTo(WORLD_W*0.50,WORLD_H*0.22);
+      ctx.lineTo(WORLD_W*0.56,WORLD_H*0.22); ctx.lineTo(WORLD_W*0.72,WORLD_H*0.62);
+      ctx.lineTo(WORLD_W,WORLD_H*0.62); ctx.lineTo(WORLD_W,WORLD_H); ctx.lineTo(0,WORLD_H); ctx.closePath(); ctx.fill();
+      const gl=ctx.createRadialGradient(WORLD_W*0.53,WORLD_H*0.22,2,WORLD_W*0.53,WORLD_H*0.22,90);
+      gl.addColorStop(0,'rgba(255,140,40,0.9)'); gl.addColorStop(1,'rgba(255,80,20,0)');
+      ctx.globalAlpha=0.7+0.3*Math.sin(Game.time*3); ctx.fillStyle=gl;
+      ctx.beginPath(); ctx.arc(WORLD_W*0.53,WORLD_H*0.22,90,0,6.283); ctx.fill();
+    } else {
+      ctx.beginPath(); ctx.moveTo(0,WORLD_H*0.55);
+      for(let x=0;x<=WORLD_W;x+=60){
+        ctx.lineTo(x, WORLD_H*0.42 + Math.sin(x*0.008+2)*60 + Math.sin(x*0.02)*24);
+      }
+      ctx.lineTo(WORLD_W,WORLD_H); ctx.lineTo(0,WORLD_H); ctx.closePath(); ctx.fill();
+      if(th.props==='pines'){ // 설산: 능선을 따라 얇은 눈 띠
+        ctx.globalAlpha=0.95; ctx.strokeStyle='#ffffff'; ctx.lineWidth=14; ctx.lineJoin='round';
+        ctx.beginPath();
+        for(let x=0;x<=WORLD_W;x+=60){
+          const y=WORLD_H*0.42 + Math.sin(x*0.008+2)*60 + Math.sin(x*0.02)*24 + 4;
+          x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+        }
+        ctx.stroke();
+      }
     }
-    ctx.lineTo(WORLD_W,WORLD_H); ctx.lineTo(0,WORLD_H); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  },
+
+  // 지면에 붙은 테마 소품
+  props(){
+    const th=Game.theme, g=Game.terrain;
+    for(const pr of Game.props){
+      const x=pr.x, y=g.heightAt(x)-2, sc=0.8+pr.seed*0.5;
+      ctx.save(); ctx.translate(x,y); ctx.scale(sc,sc);
+      if(pr.kind==='trees'){
+        ctx.fillStyle='#7a4a22'; ctx.fillRect(-3,-22,6,24);
+        ctx.fillStyle='#2f8a3a'; ctx.beginPath(); ctx.arc(0,-30,16,0,6.283); ctx.arc(-11,-22,11,0,6.283); ctx.arc(11,-22,11,0,6.283); ctx.fill();
+        ctx.fillStyle='#55b24a'; ctx.beginPath(); ctx.arc(-4,-34,9,0,6.283); ctx.fill();
+      } else if(pr.kind==='cactus'){
+        ctx.fillStyle='#3f8f46'; ctx.strokeStyle='#2b6a32'; ctx.lineWidth=1.5;
+        this.rr(-5,-40,10,42,5); ctx.fill(); ctx.stroke();
+        this.rr(-17,-30,8,16,4); ctx.fill(); ctx.stroke(); ctx.fillRect(-14,-18,10,5);
+        this.rr(9,-24,8,14,4); ctx.fill(); ctx.stroke(); ctx.fillRect(4,-14,8,5);
+      } else if(pr.kind==='pines'){
+        ctx.fillStyle='#5a3a22'; ctx.fillRect(-2.5,-14,5,16);
+        ctx.fillStyle='#1f5e3a';
+        for(let i=0;i<3;i++){ const w=18-i*4, yy=-14-i*12; ctx.beginPath(); ctx.moveTo(-w,yy); ctx.lineTo(0,yy-16); ctx.lineTo(w,yy); ctx.closePath(); ctx.fill(); }
+        ctx.fillStyle='#ffffff';
+        for(let i=0;i<3;i++){ const w=18-i*4, yy=-14-i*12; ctx.beginPath(); ctx.moveTo(-w*0.7,yy-4); ctx.lineTo(0,yy-16); ctx.lineTo(w*0.7,yy-4); ctx.lineTo(0,yy-9); ctx.closePath(); ctx.fill(); }
+      } else if(pr.kind==='volcano'){
+        // 마른 나무
+        ctx.strokeStyle='#1a1010'; ctx.lineWidth=3; ctx.lineCap='round';
+        ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,-30); ctx.moveTo(0,-18); ctx.lineTo(-10,-30); ctx.moveTo(0,-24); ctx.lineTo(9,-34); ctx.stroke();
+        ctx.fillStyle='rgba(255,120,40,0.5)'; ctx.beginPath(); ctx.arc(6,-4,3,0,6.283); ctx.fill();
+      } else if(pr.kind==='city'){
+        // 가로등
+        ctx.fillStyle='#2a2f44'; ctx.fillRect(-2,-38,4,40); ctx.fillRect(-2,-38,12,3);
+        const gl=ctx.createRadialGradient(10,-34,1,10,-34,30);
+        gl.addColorStop(0,'rgba(255,230,150,0.7)'); gl.addColorStop(1,'rgba(255,230,150,0)');
+        ctx.fillStyle=gl; ctx.beginPath(); ctx.arc(10,-34,30,0,6.283); ctx.fill();
+        ctx.fillStyle='#fff3b0'; ctx.beginPath(); ctx.arc(10,-35,3,0,6.283); ctx.fill();
+      }
+      ctx.restore();
+    }
+  },
+
+  // 대기 파티클 (화면 공간)
+  ambient(vw,vh){
+    const th=Game.theme, k=th.particles; if(!k || Game.state!=='play') return;
+    ctx.save();
+    for(const p of Game.ambient){
+      const x=p.x*vw, y=p.y*vh;
+      if(k==='snow'){ ctx.globalAlpha=0.85; ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(x,y,2.2*p.s*(vh/500),0,6.283); ctx.fill(); }
+      else if(k==='ash'){ ctx.globalAlpha=0.6; ctx.fillStyle=p.s>1.1?'#ff9a4a':'#8a8080'; ctx.fillRect(x,y,2.5*p.s,2.5*p.s); }
+      else if(k==='sand'){ ctx.globalAlpha=0.35; ctx.strokeStyle='#fff0c0'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x-14*p.s,y+1); ctx.stroke(); }
+      else { ctx.globalAlpha=0.3+0.7*Math.abs(Math.sin(p.ph*2)); ctx.fillStyle='#d8ff7a'; ctx.beginPath(); ctx.arc(x,y,2*p.s,0,6.283); ctx.fill(); }
+    }
     ctx.restore();
   },
 
   terrain(){
     const g=Game.terrain.ground;
     // 흙
+    const th=Game.theme;
     const grd=ctx.createLinearGradient(0,WORLD_H*0.3,0,WORLD_H);
-    grd.addColorStop(0,'#b5793c'); grd.addColorStop(0.6,'#8e5a28'); grd.addColorStop(1,'#6d411a');
+    grd.addColorStop(0,th.dirt[0]); grd.addColorStop(0.6,th.dirt[1]); grd.addColorStop(1,th.dirt[2]);
     ctx.fillStyle=grd;
     ctx.beginPath(); ctx.moveTo(0,WORLD_H);
     for(let x=0;x<WORLD_W;x+=2) ctx.lineTo(x,g[x]);
     ctx.lineTo(WORLD_W,WORLD_H); ctx.closePath(); ctx.fill();
     // 흙 알갱이
-    ctx.fillStyle='rgba(60,35,10,0.25)';
+    ctx.fillStyle=th.grain;
     for(let i=0;i<160;i++){
       const x=Math.floor(hash(i*3.7)*WORLD_W);
       const depth=hash(i*7.1)*140+18;
@@ -696,11 +872,11 @@ const Render = {
       if(y<WORLD_H-8) ctx.fillRect(x,y,3,3);
     }
     // 잔디
-    ctx.lineWidth=7; ctx.strokeStyle='#4fae3d'; ctx.lineJoin='round';
+    ctx.lineWidth=7; ctx.strokeStyle=th.rim[0]; ctx.lineJoin='round';
     ctx.beginPath();
     for(let x=0;x<WORLD_W;x+=2){ x===0?ctx.moveTo(x,g[x]-1):ctx.lineTo(x,g[x]-1); }
     ctx.stroke();
-    ctx.lineWidth=3; ctx.strokeStyle='#7ed957';
+    ctx.lineWidth=3; ctx.strokeStyle=th.rim[1];
     ctx.beginPath();
     for(let x=0;x<WORLD_W;x+=2){ x===0?ctx.moveTo(x,g[x]-3):ctx.lineTo(x,g[x]-3); }
     ctx.stroke();
@@ -710,13 +886,16 @@ const Render = {
     ctx.save();
     const t=Game.time;
     ctx.globalAlpha=0.85;
+    const th=Game.theme;
     const grd=ctx.createLinearGradient(0,WATER_Y,0,WORLD_H);
-    grd.addColorStop(0,'#48a7e8'); grd.addColorStop(1,'#1e5f9e');
+    grd.addColorStop(0,th.water[0]); grd.addColorStop(1,th.water[1]);
     ctx.fillStyle=grd;
+    if(th.lava){ ctx.globalAlpha=1; ctx.shadowColor='#ff8c2a'; ctx.shadowBlur=30; }
     ctx.beginPath(); ctx.moveTo(0,WORLD_H); ctx.lineTo(0,WATER_Y);
     for(let x=0;x<=WORLD_W;x+=24) ctx.lineTo(x, WATER_Y + Math.sin(x*0.03+t*2.2)*3);
     ctx.lineTo(WORLD_W,WORLD_H); ctx.closePath(); ctx.fill();
-    ctx.globalAlpha=0.5; ctx.strokeStyle='#bfe7ff'; ctx.lineWidth=2;
+    ctx.shadowBlur=0;
+    ctx.globalAlpha=th.lava?0.8:0.5; ctx.strokeStyle=th.waterLine; ctx.lineWidth=th.lava?3:2;
     ctx.beginPath();
     for(let x=0;x<=WORLD_W;x+=24){ const y=WATER_Y+Math.sin(x*0.03+t*2.2)*3; x===0?ctx.moveTo(x,y):ctx.lineTo(x,y); }
     ctx.stroke();

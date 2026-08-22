@@ -36,6 +36,32 @@ const CLOUD_PATTERNS = {
                  [0,1,2].map(i=>({x:WORLD_W*(0.32+i*0.18), y:WORLD_H*0.5, rx:110*k, ry:34*k})) ),
 };
 const CLOUD_PATTERN_LIST = ['single','band','wall','stairs','moving','combo'];
+
+// ---------------- 스테이지 ----------------
+// ai.err: 조준 오차 배율(작을수록 정확), ai.grow: 성장 속도 배율, aiHp: AI 체력 배율, windMax: 바람 한도
+const STAGES = [
+  { n:1, theme:'grass',   clouds:'none',   cloudK:1,    birds:0, ai:{err:1.7, grow:0.55}, aiHp:0.8,  windMax:10, title:'첫 포격' },
+  { n:2, theme:'grass',   clouds:'single', cloudK:1,    birds:0, ai:{err:1.45,grow:0.65}, aiHp:0.9,  windMax:12, title:'뭉게구름' },
+  { n:3, theme:'desert',  clouds:'band',   cloudK:1,    birds:1, ai:{err:1.3, grow:0.75}, aiHp:1.0,  windMax:14, title:'모래 바람' },
+  { n:4, theme:'desert',  clouds:'wall',   cloudK:1,    birds:1, ai:{err:1.15,grow:0.85}, aiHp:1.0,  windMax:16, title:'구름 벽' },
+  { n:5, theme:'snow',    clouds:'stairs', cloudK:1,    birds:2, ai:{err:1.0, grow:1.0},  aiHp:1.05, windMax:18, title:'설원 계단' },
+  { n:6, theme:'snow',    clouds:'moving', cloudK:1,    birds:2, ai:{err:0.9, grow:1.05}, aiHp:1.1,  windMax:20, title:'움직이는 구름' },
+  { n:7, theme:'volcano', clouds:'combo',  cloudK:1,    birds:2, ai:{err:0.8, grow:1.1},  aiHp:1.15, windMax:22, title:'화산 지대' },
+  { n:8, theme:'night',   clouds:'moving', cloudK:1.25, birds:2, ai:{err:0.7, grow:1.2},  aiHp:1.2,  windMax:22, title:'야간 작전' },
+];
+function stageConfig(n){
+  if(n<=STAGES.length) return STAGES[n-1];
+  const k=n-STAGES.length;   // 9부터 무한: 랜덤 조합 + 점진 강화
+  return { n, theme:THEME_LIST[Math.floor(Math.random()*THEME_LIST.length)],
+    clouds:CLOUD_PATTERN_LIST[Math.floor(Math.random()*CLOUD_PATTERN_LIST.length)],
+    cloudK:Math.min(1.8, 1.1+k*0.1), birds:2,
+    ai:{err:Math.max(0.45, 0.68-k*0.035), grow:1.2+k*0.05}, aiHp:Math.min(1.6, 1.2+k*0.06), windMax:22, title:'무한 전장 '+k };
+}
+const Progress = {
+  key:'canonBattle.stageUnlocked',
+  unlocked(){ const v=parseInt(localStorage.getItem(this.key)||'1',10); return isNaN(v)?1:Math.max(1,v); },
+  unlock(n){ if(n>this.unlocked()) localStorage.setItem(this.key, String(n)); },
+};
 // 점 (x,y)가 구름 안인지
 function inCloud(c, x, y){ const dx=(x-c.x)/c.rx, dy=(y-c.y)/c.ry; return dx*dx+dy*dy < 1; }
 
@@ -390,6 +416,7 @@ const Game = {
   clouds:[], time:0,
   theme:THEMES.grass, props:[], ambient:[], obstacles:[],
   birds:[], birdRate:1, birdTimer:6,
+  stage:null, stageNo:1, aiCfg:{err:1,grow:1}, windMax:WIND_MAX,
   selP1:0, selP2:0, selStep:0,
   aiTimer:0, aiPlan:null, aiShots:0,
   banner:{text:'', t:99},
@@ -398,6 +425,12 @@ const Game = {
 
   newMatch(opts){
     opts = opts || {};
+    this.stage = opts.stage || null;
+    if(this.stage){
+      opts = Object.assign({}, opts, { theme:this.stage.theme, clouds:this.stage.clouds, cloudK:this.stage.cloudK, birds:this.stage.birds });
+    }
+    this.aiCfg = this.stage ? this.stage.ai : {err:1, grow:1};
+    this.windMax = this.stage ? this.stage.windMax : WIND_MAX;
     this.theme = THEMES[opts.theme] || THEMES[THEME_LIST[Math.floor(Math.random()*THEME_LIST.length)]];
     this.terrain = new Terrain();
     this.projectiles=[]; this.fx=new FX();
@@ -412,8 +445,10 @@ const Game = {
     this.aiShots = 0; this.turnCount = 0;
     const x1 = rand(140, 320), x2 = rand(WORLD_W-320, WORLD_W-140);
     const t1 = new Tank(this.selP1, 0, x1, 'P1 · '+TANK_TYPES[this.selP1].name, false);
-    const aiIdx = this.mode==='1p' ? Math.floor(Math.random()*TANK_TYPES.length) : this.selP2;
-    const t2 = new Tank(aiIdx, 1, x2, (this.mode==='1p'?'AI · ':'P2 · ')+TANK_TYPES[aiIdx].name, this.mode==='1p');
+    const vsAI = this.mode!=='2p';
+    const aiIdx = vsAI ? Math.floor(Math.random()*TANK_TYPES.length) : this.selP2;
+    const t2 = new Tank(aiIdx, 1, x2, (vsAI?'AI · ':'P2 · ')+TANK_TYPES[aiIdx].name, vsAI);
+    if(this.stage){ t2.maxHp = Math.round(t2.maxHp*this.stage.aiHp); t2.hp = t2.maxHp; }
     t1.y = this.terrain.heightAt(t1.x)-6;
     t2.y = this.terrain.heightAt(t2.x)-6;
     this.tanks=[t1,t2];
@@ -423,6 +458,7 @@ const Game = {
     this.state='play';
     this.lastImpact=null;
     this.startTurn(true);
+    if(this.stage) this.showBanner(`STAGE ${this.stage.n} · ${this.theme.name}`);
     UI.enterPlay();
   },
 
@@ -493,7 +529,7 @@ const Game = {
     if(!first){
       // 바람은 턴이 지날수록 범위가 넓어지고, 이전 값에서 점진적으로 변한다
       this.turnCount++;
-      const cap = Math.min(WIND_MAX, 5 + this.turnCount*2.5);
+      const cap = Math.min(this.windMax, 5 + this.turnCount*2.5);
       const delta = Math.min(12, 3 + this.turnCount*1.2);
       this.wind = Math.round(clamp(this.wind + rand(-delta,delta), -cap, cap));
     }
@@ -520,8 +556,23 @@ const Game = {
   endMatch(){
     const alive=this.tanks.filter(t=>t.alive);
     this.state='over';
-    const title = alive.length===1 ? alive[0].name+' 승리! 🏆' : '무승부!';
-    document.getElementById('overTitle').textContent=title;
+    const overTitle=document.getElementById('overTitle'), overSub=document.getElementById('overSub'), again=document.getElementById('btnAgain');
+    if(this.stage){
+      const won = alive.length===1 && alive[0]===this.tanks[0];
+      if(won){
+        Progress.unlock(this.stage.n+1);
+        overTitle.textContent=`STAGE ${this.stage.n} 클리어! 🏆`;
+        overSub.textContent=`다음: STAGE ${this.stage.n+1} · ${stageConfig(this.stage.n+1).title}`;
+        again.textContent='다음 스테이지 ▶'; this.stageResult='won';
+      } else {
+        overTitle.textContent=alive.length===0?'무승부...':'패배...';
+        overSub.textContent=`STAGE ${this.stage.n} · ${this.stage.title}`;
+        again.textContent='다시 도전'; this.stageResult='lost';
+      }
+    } else {
+      overTitle.textContent = alive.length===1 ? alive[0].name+' 승리! 🏆' : '무승부!';
+      overSub.textContent=''; again.textContent='한 판 더';
+    }
     UI.show('overScreen');
     UI.hidePlayUI();
   },
@@ -631,9 +682,9 @@ const Game = {
     }
     if(!best) best={ang:55, pow:70, d:999};
     // 성장형 난이도: 첫 발은 크게 빗나가고, 쏠수록 감을 잡아 오차가 줄어든다
-    const skill = Math.min(1, this.aiShots*0.18);          // 0 → 1 (약 6발째 최고조)
-    const powErr = lerp(5.5, 1.2, skill);
-    const angErr = lerp(2.6, 0.6, skill);
+    const skill = Math.min(1, this.aiShots*0.18*this.aiCfg.grow);   // 0 → 1 (성장 속도는 스테이지별)
+    const powErr = lerp(5.5, 1.2, skill)*this.aiCfg.err;
+    const angErr = lerp(2.6, 0.6, skill)*this.aiCfg.err;
     best.pow = clamp(best.pow + rand(-powErr,powErr), 12, 100);
     best.ang = clamp(best.ang + rand(-angErr,angErr), 5, 85);
     this.aiShots++;
@@ -1393,10 +1444,12 @@ const UI = {
     const ids=['titleScreen','selectScreen','hud','controls','overScreen','banner','btnMute',
       'btn1p','btn2p','tankCards','btnStart','selectTitle','btnLeft','btnRight','btnAngUp','btnAngDown',
       'angleVal','btnWeapon','btnFlip','btnFire','powerFill','fuelFill','windArrow','windVal','turnTimer',
-      'hpP1','hpP2','btnAgain','btnMenu'];
+      'hpP1','hpP2','btnAgain','btnMenu','btnStage','stageScreen','stageGrid','stageHint','btnStageBack','overSub'];
     for(const id of ids) this.els[id]=document.getElementById(id);
 
     this.els.btn1p.addEventListener('click', ()=>{ Sound.init(); Sound.click(); Game.mode='1p'; this.openSelect(); });
+    this.els.btnStage.addEventListener('click', ()=>{ Sound.init(); Sound.click(); Game.mode='stage'; this.openStageSelect(); });
+    this.els.btnStageBack.addEventListener('click', ()=>{ Sound.click(); this.show('titleScreen'); });
     this.els.btn2p.addEventListener('click', ()=>{ Sound.init(); Sound.click(); Game.mode='2p'; this.openSelect(); });
     this.els.btnStart.addEventListener('click', ()=>{
       Sound.click();
@@ -1407,9 +1460,16 @@ const UI = {
         return;
       }
       if(Game.mode==='2p'){ Game.selP2=this.selIdx; } else { Game.selP1=this.selIdx; }
-      this.show(null); Game.newMatch();
+      this.show(null);
+      Game.newMatch(Game.mode==='stage' ? {stage:stageConfig(Game.stageNo)} : undefined);
     });
-    this.els.btnAgain.addEventListener('click', ()=>{ Sound.click(); this.show(null); Game.newMatch(); });
+    this.els.btnAgain.addEventListener('click', ()=>{
+      Sound.click(); this.show(null);
+      if(Game.mode==='stage'){
+        if(Game.stageResult==='won') Game.stageNo++;
+        Game.newMatch({stage:stageConfig(Game.stageNo)});
+      } else Game.newMatch();
+    });
     this.els.btnMenu.addEventListener('click', ()=>{ Sound.click(); Game.state='title'; this.hidePlayUI(); this.show('titleScreen'); });
     this.els.btnMute.addEventListener('click', ()=>{ Sound.muted=!Sound.muted; this.els.btnMute.textContent=Sound.muted?'🔇':'🔊'; });
 
@@ -1479,8 +1539,29 @@ const UI = {
   },
 
   show(id){
-    for(const s of ['titleScreen','selectScreen','overScreen']) this.els[s].classList.add('hidden');
+    for(const s of ['titleScreen','selectScreen','overScreen','stageScreen']) this.els[s].classList.add('hidden');
     if(id) this.els[id].classList.remove('hidden');
+  },
+
+  openStageSelect(){
+    this.show('stageScreen');
+    const grid=this.els.stageGrid; grid.innerHTML='';
+    const unlocked=Progress.unlocked();
+    const total=Math.max(STAGES.length, unlocked);
+    for(let n=1;n<=total;n++){
+      const b=document.createElement('button'); b.className='stage-btn';
+      const cfg=stageConfig(n);
+      const th=THEMES[cfg.theme]||THEMES.grass;
+      b.innerHTML=`${n<unlocked?'✔ ':''}${n}<small>${n<=STAGES.length?th.name:'무한'}</small>`;
+      if(n<unlocked) b.classList.add('cleared');
+      else if(n===unlocked) b.classList.add('next');
+      else { b.classList.add('locked'); b.disabled=true; }
+      b.addEventListener('click', ()=>{ Sound.click(); Game.stageNo=n; this.openSelect(); });
+      grid.appendChild(b);
+    }
+    this.els.stageHint.textContent = unlocked>STAGES.length
+      ? `8스테이지 완료! 무한 전장 ${unlocked-STAGES.length}단계까지 도달`
+      : `STAGE ${unlocked} · ${stageConfig(unlocked).title}`;
   },
 
   openSelect(){

@@ -21,10 +21,19 @@
       <p class="tagline">포트리스 스타일 · 턴제 포격전</p>
     </div>
     <div class="menu">
-      <button class="big-btn" id="btn1p">🤖 혼자 하기 (vs AI)</button>
-      <button class="big-btn" id="btn2p">👥 둘이 하기 (한 기기)</button>
+      <button class="big-btn" id="btnStage">🏁 스테이지 모드</button>
+      <button class="big-btn ghost" id="btn1p">⚡ 빠른 대전 (vs AI)</button>
+      <button class="big-btn ghost" id="btn2p">👥 둘이 하기 (한 기기)</button>
     </div>
     <p class="hint">각도와 파워, 바람을 계산해 상대 탱크를 격파하세요!</p>
+  </div>
+
+  <!-- ===== 스테이지 선택 화면 ===== -->
+  <div id="stageScreen" class="screen hidden">
+    <h2>스테이지 선택</h2>
+    <div class="stage-grid" id="stageGrid"></div>
+    <p class="hint" id="stageHint"></p>
+    <button class="big-btn ghost" id="btnStageBack">← 메인 메뉴</button>
   </div>
 
   <!-- ===== 탱크 선택 화면 ===== -->
@@ -77,6 +86,7 @@
   <!-- ===== 게임오버 ===== -->
   <div id="overScreen" class="screen hidden">
     <h2 id="overTitle">승리!</h2>
+    <p class="over-sub" id="overSub"></p>
     <button class="big-btn" id="btnAgain">한 판 더</button>
     <button class="big-btn ghost" id="btnMenu">메인 메뉴</button>
   </div>

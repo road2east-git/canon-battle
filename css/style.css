@@ -110,3 +110,18 @@ html, body { width:100%; height:100%; overflow:hidden; background:#5aa8dc;
   .hp-panel { width:min(150px,26vw); }
   .move-group .mini-gauge { width:92px; }
 }
+
+/* ---------- 스테이지 선택 ---------- */
+#stageScreen { background:linear-gradient(#8fd3ff, #cfeeff); }
+#stageScreen h2 { font-size:clamp(24px,6vw,36px); color:#155a8a; text-shadow:0 2px 0 #fff; }
+.stage-grid { display:grid; grid-template-columns:repeat(4, minmax(64px, 88px)); gap:10px; }
+.stage-btn { aspect-ratio:1; border-radius:14px; border:3px solid #265a85; background:linear-gradient(#8ec9ef,#4a90c9);
+  color:#fff; font-weight:900; font-size:clamp(16px,4vw,22px); box-shadow:0 4px 0 #265a85; cursor:pointer;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; font-family:inherit; }
+.stage-btn small { font-size:10px; font-weight:700; opacity:.9; }
+.stage-btn.cleared { background:linear-gradient(#7ce069,#3aa32a); border-color:#1f6e16; box-shadow:0 4px 0 #1f6e16; }
+.stage-btn.locked { background:linear-gradient(#c9d2da,#9aa6b2); border-color:#6b7680; box-shadow:0 4px 0 #6b7680; color:#eef2f5; cursor:not-allowed; }
+.stage-btn.next { background:linear-gradient(#ffa53e,#ff7a1e); border-color:#a34700; box-shadow:0 4px 0 #a34700; animation:pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.06)} }
+.stage-btn:active { transform:translateY(3px); box-shadow:none; }
+.over-sub { color:#fff; font-weight:700; font-size:clamp(14px,3.6vw,18px); text-shadow:0 2px 4px rgba(0,0,0,.5); text-align:center; max-width:80vw; }
